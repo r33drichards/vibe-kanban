@@ -23,7 +23,7 @@ import {
   DeleteTaskConfirmationDialog,
   FolderPickerDialog,
   TaskTemplateEditDialog,
-  RebaseDialog,
+  ChangeTargetBranchDialog,
   CreateConfigurationDialog,
   DeleteConfigurationDialog,
   ProjectFormDialog,
@@ -45,7 +45,7 @@ NiceModal.register('task-form', TaskFormDialog);
 NiceModal.register('editor-selection', EditorSelectionDialog);
 NiceModal.register('folder-picker', FolderPickerDialog);
 NiceModal.register('task-template-edit', TaskTemplateEditDialog);
-NiceModal.register('rebase-dialog', RebaseDialog);
+NiceModal.register('change-target-branch-dialog', ChangeTargetBranchDialog);
 NiceModal.register('create-configuration', CreateConfigurationDialog);
 NiceModal.register('delete-configuration', DeleteConfigurationDialog);
 NiceModal.register('project-form', ProjectFormDialog);
