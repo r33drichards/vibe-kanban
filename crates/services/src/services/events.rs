@@ -154,19 +154,9 @@ pub enum RecordTypes {
     TaskAttempt(TaskAttempt),
     ExecutionProcess(ExecutionProcess),
     FollowUpDraft(db::models::follow_up_draft::FollowUpDraft),
-    DeletedTask {
-        rowid: i64,
-        project_id: Option<Uuid>,
-        task_id: Option<Uuid>,
-    },
     DeletedTaskAttempt {
         rowid: i64,
         task_id: Option<Uuid>,
-    },
-    DeletedExecutionProcess {
-        rowid: i64,
-        task_attempt_id: Option<Uuid>,
-        process_id: Option<Uuid>,
     },
     DeletedFollowUpDraft {
         rowid: i64,
@@ -307,14 +297,14 @@ impl EventService {
                         runtime_handle.spawn(async move {
                             let record_type: RecordTypes = match (table, hook.operation.clone()) {
                                 (HookTables::Tasks, SqliteOperation::Delete) => {
-                                    // Try to get task before deletion to capture project_id and task_id
-                                    let task_info =
-                                        Task::find_by_rowid(&db.pool, rowid).await.ok().flatten();
-                                    RecordTypes::DeletedTask {
-                                        rowid,
-                                        project_id: task_info.as_ref().map(|t| t.project_id),
-                                        task_id: task_info.as_ref().map(|t| t.id),
-                                    }
+                                    // Task deletion is now handled by preupdate hook
+                                    // Skip post-update processing to avoid duplicate patches
+                                    return;
+                                }
+                                (HookTables::ExecutionProcesses, SqliteOperation::Delete) => {
+                                    // Execution process deletion is now handled by preupdate hook  
+                                    // Skip post-update processing to avoid duplicate patches
+                                    return;
                                 }
                                 (HookTables::TaskAttempts, SqliteOperation::Delete) => {
                                     // Try to get task_attempt before deletion to capture task_id
@@ -325,31 +315,13 @@ impl EventService {
                                         .map(|attempt| attempt.task_id);
                                     RecordTypes::DeletedTaskAttempt { rowid, task_id }
                                 }
-                                (HookTables::ExecutionProcesses, SqliteOperation::Delete) => {
-                                    // Try to get execution_process before deletion to capture full process data
-                                    if let Ok(Some(process)) =
-                                        ExecutionProcess::find_by_rowid(&db.pool, rowid).await
-                                    {
-                                        RecordTypes::DeletedExecutionProcess {
-                                            rowid,
-                                            task_attempt_id: Some(process.task_attempt_id),
-                                            process_id: Some(process.id),
-                                        }
-                                    } else {
-                                        RecordTypes::DeletedExecutionProcess {
-                                            rowid,
-                                            task_attempt_id: None,
-                                            process_id: None,
-                                        }
-                                    }
-                                }
                                 (HookTables::Tasks, _) => {
                                     match Task::find_by_rowid(&db.pool, rowid).await {
                                         Ok(Some(task)) => RecordTypes::Task(task),
-                                        Ok(None) => RecordTypes::DeletedTask {
-                                            rowid,
-                                            project_id: None,
-                                            task_id: None,
+                                        Ok(None) => {
+                                            // Row not found - likely already deleted, skip processing
+                                            tracing::debug!("Task rowid {} not found, skipping", rowid);
+                                            return;
                                         },
                                         Err(e) => {
                                             tracing::error!("Failed to fetch task: {:?}", e);
@@ -376,10 +348,10 @@ impl EventService {
                                 (HookTables::ExecutionProcesses, _) => {
                                     match ExecutionProcess::find_by_rowid(&db.pool, rowid).await {
                                         Ok(Some(process)) => RecordTypes::ExecutionProcess(process),
-                                        Ok(None) => RecordTypes::DeletedExecutionProcess {
-                                            rowid,
-                                            task_attempt_id: None,
-                                            process_id: None,
+                                        Ok(None) => {
+                                            // Row not found - likely already deleted, skip processing
+                                            tracing::debug!("ExecutionProcess rowid {} not found, skipping", rowid);
+                                            return;
                                         },
                                         Err(e) => {
                                             tracing::error!(
@@ -460,11 +432,6 @@ impl EventService {
                                         return;
                                     }
                                 }
-                                RecordTypes::DeletedTask { .. } => {
-                                    // Task deletion is now handled by preupdate hook to avoid None task_id issue
-                                    // Skip this case as patch was already sent from preupdate hook
-                                    return;
-                                }
                                 RecordTypes::TaskAttempt(attempt) => {
                                     // Task attempts should update the parent task with fresh data
                                     if let Ok(Some(task)) =
@@ -529,11 +496,6 @@ impl EventService {
                                         );
                                     }
 
-                                    return;
-                                }
-                                RecordTypes::DeletedExecutionProcess { .. } => {
-                                    // Execution process deletion is now handled by preupdate hook to avoid None process_id issue
-                                    // Skip this case as patch was already sent from preupdate hook
                                     return;
                                 }
                                 _ => {}
@@ -651,14 +613,6 @@ impl EventService {
                                     match &event_patch.value.record {
                                         RecordTypes::Task(task) => {
                                             if task.project_id == project_id {
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        RecordTypes::DeletedTask {
-                                            project_id: Some(deleted_project_id),
-                                            ..
-                                        } => {
-                                            if *deleted_project_id == project_id {
                                                 return Some(Ok(LogMsg::JsonPatch(patch)));
                                             }
                                         }
@@ -796,14 +750,6 @@ impl EventService {
                                                     execution_process_patch::remove(process.id);
                                                 return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                             }
-                                            return Some(Ok(LogMsg::JsonPatch(patch)));
-                                        }
-                                    }
-                                    RecordTypes::DeletedExecutionProcess {
-                                        task_attempt_id: Some(deleted_attempt_id),
-                                        ..
-                                    } => {
-                                        if *deleted_attempt_id == task_attempt_id {
                                             return Some(Ok(LogMsg::JsonPatch(patch)));
                                         }
                                     }
