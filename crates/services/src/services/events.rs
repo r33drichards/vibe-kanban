@@ -248,6 +248,40 @@ impl EventService {
             Box::pin(async move {
                 let mut handle = conn.lock_handle().await?;
                 let runtime_handle = tokio::runtime::Handle::current();
+                
+                // Set up preupdate hook to capture task data before deletion
+                handle.set_preupdate_hook({
+                    let msg_store_for_preupdate = msg_store_for_hook.clone();
+                    move |preupdate: sqlx::sqlite::PreUpdateHookResult<'_>| {
+                        if preupdate.table == "tasks" 
+                            && preupdate.operation == sqlx::sqlite::SqliteOperation::Delete {
+                            // Extract task ID and project ID from old row values before deletion
+                            if let (Ok(id_value), Ok(project_id_value)) = (
+                                preupdate.old(0), // id column 
+                                preupdate.old(1)  // project_id column
+                            ) {
+                                // Decode UUID from BLOB (16 bytes) or text format
+                                let decode_uuid = |value: sqlx::sqlite::SqliteValueRef| -> Option<uuid::Uuid> {
+                                    match value {
+                                        sqlx::sqlite::SqliteValueRef::Blob(bytes) if bytes.len() == 16 => {
+                                            uuid::Uuid::from_slice(bytes).ok()
+                                        },
+                                        sqlx::sqlite::SqliteValueRef::Text(text) => {
+                                            uuid::Uuid::parse_str(text).ok()
+                                        },
+                                        _ => None,
+                                    }
+                                };
+                                
+                                if let Some(task_id) = decode_uuid(id_value) {
+                                    let patch = task_patch::remove(task_id);
+                                    msg_store_for_preupdate.push_patch(patch);
+                                }
+                            }
+                        }
+                    }
+                });
+
                 handle.set_update_hook(move |hook: sqlx::sqlite::UpdateHookResult<'_>| {
                     let runtime_handle = runtime_handle.clone();
                     let entry_count_for_hook = entry_count_for_hook.clone();
@@ -412,12 +446,9 @@ impl EventService {
                                         return;
                                     }
                                 }
-                                RecordTypes::DeletedTask {
-                                    task_id: Some(task_id),
-                                    ..
-                                } => {
-                                    let patch = task_patch::remove(*task_id);
-                                    msg_store_for_hook.push_patch(patch);
+                                RecordTypes::DeletedTask { .. } => {
+                                    // Task deletion is now handled by preupdate hook to avoid None task_id issue
+                                    // Skip this case as patch was already sent from preupdate hook
                                     return;
                                 }
                                 RecordTypes::TaskAttempt(attempt) => {
