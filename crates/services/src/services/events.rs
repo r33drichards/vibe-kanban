@@ -127,6 +127,108 @@ pub mod execution_process_patch {
     }
 }
 
+/// Helper functions for creating task attempt-specific patches
+pub mod task_attempt_patch {
+    use db::models::task_attempt::TaskAttempt;
+
+    use super::*;
+
+    /// Escape JSON Pointer special characters
+    fn escape_pointer_segment(s: &str) -> String {
+        s.replace('~', "~0").replace('/', "~1")
+    }
+
+    /// Create path for task attempt operation
+    fn task_attempt_path(attempt_id: Uuid) -> String {
+        format!(
+            "/task_attempts/{}",
+            escape_pointer_segment(&attempt_id.to_string())
+        )
+    }
+
+    /// Create patch for adding a new task attempt
+    pub fn add(attempt: &TaskAttempt) -> Patch {
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: task_attempt_path(attempt.id)
+                .try_into()
+                .expect("Task attempt path should be valid"),
+            value: serde_json::to_value(attempt)
+                .expect("Task attempt serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for updating an existing task attempt
+    pub fn replace(attempt: &TaskAttempt) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: task_attempt_path(attempt.id)
+                .try_into()
+                .expect("Task attempt path should be valid"),
+            value: serde_json::to_value(attempt)
+                .expect("Task attempt serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for removing a task attempt
+    pub fn remove(attempt_id: Uuid) -> Patch {
+        Patch(vec![PatchOperation::Remove(RemoveOperation {
+            path: task_attempt_path(attempt_id)
+                .try_into()
+                .expect("Task attempt path should be valid"),
+        })])
+    }
+}
+
+/// Helper functions for creating follow up draft-specific patches
+pub mod follow_up_draft_patch {
+    use db::models::follow_up_draft::FollowUpDraft;
+
+    use super::*;
+
+    /// Escape JSON Pointer special characters
+    fn escape_pointer_segment(s: &str) -> String {
+        s.replace('~', "~0").replace('/', "~1")
+    }
+
+    /// Create path for follow up draft operation
+    fn follow_up_draft_path(draft_id: Uuid) -> String {
+        format!(
+            "/follow_up_drafts/{}",
+            escape_pointer_segment(&draft_id.to_string())
+        )
+    }
+
+    /// Create patch for adding a new follow up draft
+    pub fn add(draft: &FollowUpDraft) -> Patch {
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: follow_up_draft_path(draft.id)
+                .try_into()
+                .expect("Follow up draft path should be valid"),
+            value: serde_json::to_value(draft)
+                .expect("Follow up draft serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for updating an existing follow up draft
+    pub fn replace(draft: &FollowUpDraft) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: follow_up_draft_path(draft.id)
+                .try_into()
+                .expect("Follow up draft path should be valid"),
+            value: serde_json::to_value(draft)
+                .expect("Follow up draft serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for removing a follow up draft
+    pub fn remove(draft_id: Uuid) -> Patch {
+        Patch(vec![PatchOperation::Remove(RemoveOperation {
+            path: follow_up_draft_path(draft_id)
+                .try_into()
+                .expect("Follow up draft path should be valid"),
+        })])
+    }
+}
+
 #[derive(Clone)]
 pub struct EventService {
     msg_store: Arc<MsgStore>,
@@ -277,9 +379,40 @@ impl EventService {
                                         }
                                     }
                                 }
+                                "task_attempts" => {
+                                    // Extract attempt ID from old column values before deletion
+                                    if let Ok(id_value) = preupdate.get_old_column_value(0)
+                                        && !id_value.is_null()
+                                    {
+                                        // Decode UUID from SQLite value
+                                        if let Ok(attempt_id) =
+                                            <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
+                                                id_value,
+                                            )
+                                        {
+                                            let patch = task_attempt_patch::remove(attempt_id);
+                                            msg_store_for_preupdate.push_patch(patch);
+                                        }
+                                    }
+                                }
+                                "follow_up_drafts" => {
+                                    // Extract draft ID from old column values before deletion
+                                    if let Ok(id_value) = preupdate.get_old_column_value(0)
+                                        && !id_value.is_null()
+                                    {
+                                        // Decode UUID from SQLite value
+                                        if let Ok(draft_id) =
+                                            <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
+                                                id_value,
+                                            )
+                                        {
+                                            let patch = follow_up_draft_patch::remove(draft_id);
+                                            msg_store_for_preupdate.push_patch(patch);
+                                        }
+                                    }
+                                }
                                 _ => {
-                                    // Ignore other tables (task_attempts, follow_up_drafts, etc.)
-                                    // Those don't have direct remove patches and rely on parent updates
+                                    // Ignore other tables  
                                 }
                             }
                         }
@@ -454,7 +587,8 @@ impl EventService {
                                     task_id: Some(task_id),
                                     ..
                                 } => {
-                                    // Task attempt deletion should update the parent task with fresh data
+                                    // Task attempt deletion: preupdate hook already sent direct remove patch
+                                    // This parent task refresh provides backward compatibility and safety net
                                     if let Ok(Some(task)) =
                                         Task::find_by_id(&db.pool, *task_id).await
                                         && let Ok(task_list) =
