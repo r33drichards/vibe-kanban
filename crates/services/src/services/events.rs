@@ -32,200 +32,169 @@ pub enum EventError {
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }
 
+/// Trait for types that can be used in JSON patch operations
+pub trait Patchable: serde::Serialize {
+    const PATH_PREFIX: &'static str;
+    type Id: ToString + Copy;
+    fn id(&self) -> Self::Id;
+}
+
+/// Implementations of Patchable for all supported types
+impl Patchable for TaskWithAttemptStatus {
+    const PATH_PREFIX: &'static str = "/tasks";
+    type Id = Uuid;
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+}
+
+impl Patchable for ExecutionProcess {
+    const PATH_PREFIX: &'static str = "/execution_processes";
+    type Id = Uuid;
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+}
+
+impl Patchable for TaskAttempt {
+    const PATH_PREFIX: &'static str = "/task_attempts";
+    type Id = Uuid;
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+}
+
+impl Patchable for db::models::follow_up_draft::FollowUpDraft {
+    const PATH_PREFIX: &'static str = "/follow_up_drafts";
+    type Id = Uuid;
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+}
+
+/// Generic patch operations that work with any Patchable type
+pub mod patch_ops {
+    use super::*;
+
+    /// Escape JSON Pointer special characters
+    pub(crate) fn escape_pointer_segment(s: &str) -> String {
+        s.replace('~', "~0").replace('/', "~1")
+    }
+
+    /// Create path for operation
+    fn path_for<T: Patchable>(id: T::Id) -> String {
+        format!(
+            "{}/{}",
+            T::PATH_PREFIX,
+            escape_pointer_segment(&id.to_string())
+        )
+    }
+
+    /// Create patch for adding a new record
+    pub fn add<T: Patchable>(value: &T) -> Patch {
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: path_for::<T>(value.id())
+                .try_into()
+                .expect("Path should be valid"),
+            value: serde_json::to_value(value).expect("Serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for updating an existing record
+    pub fn replace<T: Patchable>(value: &T) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: path_for::<T>(value.id())
+                .try_into()
+                .expect("Path should be valid"),
+            value: serde_json::to_value(value).expect("Serialization should not fail"),
+        })])
+    }
+
+    /// Create patch for removing a record
+    pub fn remove<T: Patchable>(id: T::Id) -> Patch {
+        Patch(vec![PatchOperation::Remove(RemoveOperation {
+            path: path_for::<T>(id).try_into().expect("Path should be valid"),
+        })])
+    }
+}
+
 /// Helper functions for creating task-specific patches
 pub mod task_patch {
     use super::*;
 
-    /// Escape JSON Pointer special characters
-    fn escape_pointer_segment(s: &str) -> String {
-        s.replace('~', "~0").replace('/', "~1")
-    }
-
-    /// Create path for task operation
-    fn task_path(task_id: Uuid) -> String {
-        format!("/tasks/{}", escape_pointer_segment(&task_id.to_string()))
-    }
-
     /// Create patch for adding a new task
     pub fn add(task: &TaskWithAttemptStatus) -> Patch {
-        Patch(vec![PatchOperation::Add(AddOperation {
-            path: task_path(task.id)
-                .try_into()
-                .expect("Task path should be valid"),
-            value: serde_json::to_value(task).expect("Task serialization should not fail"),
-        })])
+        patch_ops::add(task)
     }
 
     /// Create patch for updating an existing task
     pub fn replace(task: &TaskWithAttemptStatus) -> Patch {
-        Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: task_path(task.id)
-                .try_into()
-                .expect("Task path should be valid"),
-            value: serde_json::to_value(task).expect("Task serialization should not fail"),
-        })])
+        patch_ops::replace(task)
     }
 
     /// Create patch for removing a task
     pub fn remove(task_id: Uuid) -> Patch {
-        Patch(vec![PatchOperation::Remove(RemoveOperation {
-            path: task_path(task_id)
-                .try_into()
-                .expect("Task path should be valid"),
-        })])
+        patch_ops::remove::<TaskWithAttemptStatus>(task_id)
     }
 }
 
 /// Helper functions for creating execution process-specific patches
 pub mod execution_process_patch {
-    use db::models::execution_process::ExecutionProcess;
-
     use super::*;
-
-    /// Escape JSON Pointer special characters
-    fn escape_pointer_segment(s: &str) -> String {
-        s.replace('~', "~0").replace('/', "~1")
-    }
-
-    /// Create path for execution process operation
-    fn execution_process_path(process_id: Uuid) -> String {
-        format!(
-            "/execution_processes/{}",
-            escape_pointer_segment(&process_id.to_string())
-        )
-    }
 
     /// Create patch for adding a new execution process
     pub fn add(process: &ExecutionProcess) -> Patch {
-        Patch(vec![PatchOperation::Add(AddOperation {
-            path: execution_process_path(process.id)
-                .try_into()
-                .expect("Execution process path should be valid"),
-            value: serde_json::to_value(process)
-                .expect("Execution process serialization should not fail"),
-        })])
+        patch_ops::add(process)
     }
 
     /// Create patch for updating an existing execution process
     pub fn replace(process: &ExecutionProcess) -> Patch {
-        Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: execution_process_path(process.id)
-                .try_into()
-                .expect("Execution process path should be valid"),
-            value: serde_json::to_value(process)
-                .expect("Execution process serialization should not fail"),
-        })])
+        patch_ops::replace(process)
     }
 
     /// Create patch for removing an execution process
     pub fn remove(process_id: Uuid) -> Patch {
-        Patch(vec![PatchOperation::Remove(RemoveOperation {
-            path: execution_process_path(process_id)
-                .try_into()
-                .expect("Execution process path should be valid"),
-        })])
+        patch_ops::remove::<ExecutionProcess>(process_id)
     }
 }
 
 /// Helper functions for creating task attempt-specific patches
 pub mod task_attempt_patch {
-    use db::models::task_attempt::TaskAttempt;
-
     use super::*;
-
-    /// Escape JSON Pointer special characters
-    fn escape_pointer_segment(s: &str) -> String {
-        s.replace('~', "~0").replace('/', "~1")
-    }
-
-    /// Create path for task attempt operation
-    fn task_attempt_path(attempt_id: Uuid) -> String {
-        format!(
-            "/task_attempts/{}",
-            escape_pointer_segment(&attempt_id.to_string())
-        )
-    }
 
     /// Create patch for adding a new task attempt
     pub fn add(attempt: &TaskAttempt) -> Patch {
-        Patch(vec![PatchOperation::Add(AddOperation {
-            path: task_attempt_path(attempt.id)
-                .try_into()
-                .expect("Task attempt path should be valid"),
-            value: serde_json::to_value(attempt)
-                .expect("Task attempt serialization should not fail"),
-        })])
+        patch_ops::add(attempt)
     }
 
     /// Create patch for updating an existing task attempt
     pub fn replace(attempt: &TaskAttempt) -> Patch {
-        Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: task_attempt_path(attempt.id)
-                .try_into()
-                .expect("Task attempt path should be valid"),
-            value: serde_json::to_value(attempt)
-                .expect("Task attempt serialization should not fail"),
-        })])
+        patch_ops::replace(attempt)
     }
 
     /// Create patch for removing a task attempt
     pub fn remove(attempt_id: Uuid) -> Patch {
-        Patch(vec![PatchOperation::Remove(RemoveOperation {
-            path: task_attempt_path(attempt_id)
-                .try_into()
-                .expect("Task attempt path should be valid"),
-        })])
+        patch_ops::remove::<TaskAttempt>(attempt_id)
     }
 }
 
 /// Helper functions for creating follow up draft-specific patches
 pub mod follow_up_draft_patch {
-    use db::models::follow_up_draft::FollowUpDraft;
-
     use super::*;
 
-    /// Escape JSON Pointer special characters
-    fn escape_pointer_segment(s: &str) -> String {
-        s.replace('~', "~0").replace('/', "~1")
-    }
-
-    /// Create path for follow up draft operation
-    fn follow_up_draft_path(draft_id: Uuid) -> String {
-        format!(
-            "/follow_up_drafts/{}",
-            escape_pointer_segment(&draft_id.to_string())
-        )
-    }
-
     /// Create patch for adding a new follow up draft
-    pub fn add(draft: &FollowUpDraft) -> Patch {
-        Patch(vec![PatchOperation::Add(AddOperation {
-            path: follow_up_draft_path(draft.id)
-                .try_into()
-                .expect("Follow up draft path should be valid"),
-            value: serde_json::to_value(draft)
-                .expect("Follow up draft serialization should not fail"),
-        })])
+    pub fn add(draft: &db::models::follow_up_draft::FollowUpDraft) -> Patch {
+        patch_ops::add(draft)
     }
 
     /// Create patch for updating an existing follow up draft
-    pub fn replace(draft: &FollowUpDraft) -> Patch {
-        Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: follow_up_draft_path(draft.id)
-                .try_into()
-                .expect("Follow up draft path should be valid"),
-            value: serde_json::to_value(draft)
-                .expect("Follow up draft serialization should not fail"),
-        })])
+    pub fn replace(draft: &db::models::follow_up_draft::FollowUpDraft) -> Patch {
+        patch_ops::replace(draft)
     }
 
     /// Create patch for removing a follow up draft
     pub fn remove(draft_id: Uuid) -> Patch {
-        Patch(vec![PatchOperation::Remove(RemoveOperation {
-            path: follow_up_draft_path(draft_id)
-                .try_into()
-                .expect("Follow up draft path should be valid"),
-        })])
+        patch_ops::remove::<db::models::follow_up_draft::FollowUpDraft>(draft_id)
     }
 }
 
