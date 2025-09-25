@@ -256,14 +256,6 @@ pub enum RecordTypes {
     TaskAttempt(TaskAttempt),
     ExecutionProcess(ExecutionProcess),
     FollowUpDraft(db::models::follow_up_draft::FollowUpDraft),
-    DeletedTaskAttempt {
-        rowid: i64,
-        task_id: Option<Uuid>,
-    },
-    DeletedFollowUpDraft {
-        rowid: i64,
-        task_attempt_id: Option<Uuid>,
-    },
 }
 
 #[derive(Serialize, Deserialize, TS)]
@@ -440,13 +432,9 @@ impl EventService {
                                     return;
                                 }
                                 (HookTables::TaskAttempts, SqliteOperation::Delete) => {
-                                    // Try to get task_attempt before deletion to capture task_id
-                                    let task_id = TaskAttempt::find_by_rowid(&db.pool, rowid)
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .map(|attempt| attempt.task_id);
-                                    RecordTypes::DeletedTaskAttempt { rowid, task_id }
+                                    // Task attempt deletion is now handled by preupdate hook
+                                    // Skip post-update processing to avoid duplicate patches
+                                    return;
                                 }
                                 (HookTables::Tasks, _) => {
                                     match Task::find_by_rowid(&db.pool, rowid).await {
@@ -465,9 +453,10 @@ impl EventService {
                                 (HookTables::TaskAttempts, _) => {
                                     match TaskAttempt::find_by_rowid(&db.pool, rowid).await {
                                         Ok(Some(attempt)) => RecordTypes::TaskAttempt(attempt),
-                                        Ok(None) => RecordTypes::DeletedTaskAttempt {
-                                            rowid,
-                                            task_id: None,
+                                        Ok(None) => {
+                                            // Row not found - likely already deleted, skip processing
+                                            tracing::debug!("TaskAttempt rowid {} not found, skipping", rowid);
+                                            return;
                                         },
                                         Err(e) => {
                                             tracing::error!(
@@ -496,19 +485,9 @@ impl EventService {
                                     }
                                 }
                                 (HookTables::FollowUpDrafts, SqliteOperation::Delete) => {
-                                    // Try to get draft before deletion to capture attempt id
-                                    let attempt_id =
-                                        db::models::follow_up_draft::FollowUpDraft::find_by_rowid(
-                                            &db.pool, rowid,
-                                        )
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .map(|d| d.task_attempt_id);
-                                    RecordTypes::DeletedFollowUpDraft {
-                                        rowid,
-                                        task_attempt_id: attempt_id,
-                                    }
+                                    // Follow up draft deletion is now handled by preupdate hook
+                                    // Skip post-update processing to avoid duplicate patches
+                                    return;
                                 }
                                 (HookTables::FollowUpDrafts, _) => {
                                     match db::models::follow_up_draft::FollowUpDraft::find_by_rowid(
@@ -517,9 +496,10 @@ impl EventService {
                                     .await
                                     {
                                         Ok(Some(draft)) => RecordTypes::FollowUpDraft(draft),
-                                        Ok(None) => RecordTypes::DeletedFollowUpDraft {
-                                            rowid,
-                                            task_attempt_id: None,
+                                        Ok(None) => {
+                                            // Row not found - likely already deleted, skip processing
+                                            tracing::debug!("FollowUpDraft rowid {} not found, skipping", rowid);
+                                            return;
                                         },
                                         Err(e) => {
                                             tracing::error!(
@@ -583,37 +563,15 @@ impl EventService {
                                         return;
                                     }
                                 }
-                                RecordTypes::DeletedTaskAttempt {
-                                    task_id: Some(task_id),
-                                    ..
-                                } => {
-                                    // Task attempt deletion: preupdate hook already sent direct remove patch
-                                    // This parent task refresh provides backward compatibility and safety net
-                                    if let Ok(Some(task)) =
-                                        Task::find_by_id(&db.pool, *task_id).await
-                                        && let Ok(task_list) =
-                                            Task::find_by_project_id_with_attempt_status(
-                                                &db.pool,
-                                                task.project_id,
-                                            )
-                                            .await
-                                        && let Some(task_with_status) =
-                                            task_list.into_iter().find(|t| t.id == *task_id)
-                                    {
-                                        let patch = task_patch::replace(&task_with_status);
-                                        msg_store_for_hook.push_patch(patch);
-                                        return;
-                                    }
-                                }
                                 RecordTypes::ExecutionProcess(process) => {
                                     let patch = match hook.operation {
                                         SqliteOperation::Insert => {
-                                            execution_process_patch::add(process)
+                                            execution_process_patch::add(&process)
                                         }
                                         SqliteOperation::Update => {
-                                            execution_process_patch::replace(process)
+                                            execution_process_patch::replace(&process)
                                         }
-                                        _ => execution_process_patch::replace(process), // fallback
+                                        _ => execution_process_patch::replace(&process), // fallback
                                     };
                                     msg_store_for_hook.push_patch(patch);
 
@@ -754,18 +712,6 @@ impl EventService {
                                             // Check if this task_attempt belongs to a task in our project
                                             if let Ok(Some(task)) =
                                                 Task::find_by_id(&db_pool, attempt.task_id).await
-                                                && task.project_id == project_id
-                                            {
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        RecordTypes::DeletedTaskAttempt {
-                                            task_id: Some(deleted_task_id),
-                                            ..
-                                        } => {
-                                            // Check if deleted attempt belonged to a task in our project
-                                            if let Ok(Some(task)) =
-                                                Task::find_by_id(&db_pool, *deleted_task_id).await
                                                 && task.project_id == project_id
                                             {
                                                 return Some(Ok(LogMsg::JsonPatch(patch)));
@@ -954,35 +900,6 @@ impl EventService {
                                                 "op": "replace",
                                                 "path": "/follow_up_draft",
                                                 "value": draft
-                                            }
-                                        ]);
-                                        let direct_patch = serde_json::from_value(direct).unwrap();
-                                        return Some(Ok(LogMsg::JsonPatch(direct_patch)));
-                                    }
-                                }
-                                RecordTypes::DeletedFollowUpDraft {
-                                    task_attempt_id: Some(id),
-                                    ..
-                                } => {
-                                    if *id == task_attempt_id {
-                                        // Replace with empty draft state
-                                        let empty = json!({
-                                            "id": uuid::Uuid::new_v4(),
-                                            "task_attempt_id": id,
-                                            "prompt": "",
-                                            "queued": false,
-                                            "sending": false,
-                                            "variant": null,
-                                            "image_ids": null,
-                                            "created_at": chrono::Utc::now(),
-                                            "updated_at": chrono::Utc::now(),
-                                            "version": 0
-                                        });
-                                        let direct = json!([
-                                            {
-                                                "op": "replace",
-                                                "path": "/follow_up_draft",
-                                                "value": empty
                                             }
                                         ]);
                                         let direct_patch = serde_json::from_value(direct).unwrap();
