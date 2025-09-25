@@ -253,22 +253,45 @@ impl EventService {
                 handle.set_preupdate_hook({
                     let msg_store_for_preupdate = msg_store_for_hook.clone();
                     move |preupdate: sqlx::sqlite::PreupdateHookResult<'_>| {
-                        if preupdate.table == "tasks"
-                            && preupdate.operation == sqlx::sqlite::SqliteOperation::Delete
-                        {
-                            // Extract task ID from old column values before deletion
-                            if let Ok(id_value) = preupdate.get_old_column_value(0)
-                                && !id_value.is_null() {
-                                    // Decode UUID from SQLite value
-                                    if let Ok(task_id) =
-                                        <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
-                                            id_value,
-                                        )
+                        if preupdate.operation == sqlx::sqlite::SqliteOperation::Delete {
+                            match preupdate.table {
+                                "tasks" => {
+                                    // Extract task ID from old column values before deletion
+                                    if let Ok(id_value) = preupdate.get_old_column_value(0)
+                                        && !id_value.is_null()
                                     {
-                                        let patch = task_patch::remove(task_id);
-                                        msg_store_for_preupdate.push_patch(patch);
+                                        // Decode UUID from SQLite value
+                                        if let Ok(task_id) =
+                                            <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
+                                                id_value,
+                                            )
+                                        {
+                                            let patch = task_patch::remove(task_id);
+                                            msg_store_for_preupdate.push_patch(patch);
+                                        }
                                     }
                                 }
+                                "execution_processes" => {
+                                    // Extract process ID from old column values before deletion
+                                    if let Ok(id_value) = preupdate.get_old_column_value(0)
+                                        && !id_value.is_null()
+                                    {
+                                        // Decode UUID from SQLite value
+                                        if let Ok(process_id) =
+                                            <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
+                                                id_value,
+                                            )
+                                        {
+                                            let patch = execution_process_patch::remove(process_id);
+                                            msg_store_for_preupdate.push_patch(patch);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // Ignore other tables (task_attempts, follow_up_drafts, etc.)
+                                    // Those don't have direct remove patches and rely on parent updates
+                                }
+                            }
                         }
                     }
                 });
@@ -508,29 +531,9 @@ impl EventService {
 
                                     return;
                                 }
-                                RecordTypes::DeletedExecutionProcess {
-                                    process_id: Some(process_id),
-                                    task_attempt_id,
-                                    ..
-                                } => {
-                                    let patch = execution_process_patch::remove(*process_id);
-                                    msg_store_for_hook.push_patch(patch);
-
-                                    if let Some(task_attempt_id) = task_attempt_id
-                                        && let Err(err) =
-                                            EventService::push_task_update_for_attempt(
-                                                &db.pool,
-                                                msg_store_for_hook.clone(),
-                                                *task_attempt_id,
-                                            )
-                                            .await
-                                        {
-                                            tracing::error!(
-                                                "Failed to push task update after execution process removal: {:?}",
-                                                err
-                                            );
-                                        }
-
+                                RecordTypes::DeletedExecutionProcess { .. } => {
+                                    // Execution process deletion is now handled by preupdate hook to avoid None process_id issue
+                                    // Skip this case as patch was already sent from preupdate hook
                                     return;
                                 }
                                 _ => {}
