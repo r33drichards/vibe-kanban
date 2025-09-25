@@ -566,12 +566,12 @@ impl EventService {
                                 RecordTypes::ExecutionProcess(process) => {
                                     let patch = match hook.operation {
                                         SqliteOperation::Insert => {
-                                            execution_process_patch::add(&process)
+                                            execution_process_patch::add(process)
                                         }
                                         SqliteOperation::Update => {
-                                            execution_process_patch::replace(&process)
+                                            execution_process_patch::replace(process)
                                         }
-                                        _ => execution_process_patch::replace(&process), // fallback
+                                        _ => execution_process_patch::replace(process), // fallback
                                     };
                                     msg_store_for_hook.push_patch(patch);
 
@@ -890,25 +890,19 @@ impl EventService {
                             && let Ok(event_patch_value) = serde_json::to_value(event_patch_op)
                             && let Ok(event_patch) =
                                 serde_json::from_value::<EventPatch>(event_patch_value)
-                        {
-                            match &event_patch.value.record {
-                                RecordTypes::FollowUpDraft(draft) => {
-                                    if draft.task_attempt_id == task_attempt_id {
-                                        // Build a direct patch to replace /follow_up_draft
-                                        let direct = json!([
-                                            {
-                                                "op": "replace",
-                                                "path": "/follow_up_draft",
-                                                "value": draft
-                                            }
-                                        ]);
-                                        let direct_patch = serde_json::from_value(direct).unwrap();
-                                        return Some(Ok(LogMsg::JsonPatch(direct_patch)));
-                                    }
+                            && let RecordTypes::FollowUpDraft(draft) = &event_patch.value.record
+                                && draft.task_attempt_id == task_attempt_id {
+                                    // Build a direct patch to replace /follow_up_draft
+                                    let direct = json!([
+                                        {
+                                            "op": "replace",
+                                            "path": "/follow_up_draft",
+                                            "value": draft
+                                        }
+                                    ]);
+                                    let direct_patch = serde_json::from_value(direct).unwrap();
+                                    return Some(Ok(LogMsg::JsonPatch(direct_patch)));
                                 }
-                                _ => {}
-                            }
-                        }
                         None
                     }
                     Ok(other) => Some(Ok(other)),
