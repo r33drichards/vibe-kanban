@@ -741,21 +741,15 @@ impl EventService {
                             else if let Ok(event_patch_value) = serde_json::to_value(patch_op)
                                 && let Ok(event_patch) =
                                     serde_json::from_value::<EventPatch>(event_patch_value)
-                            {
-                                match &event_patch.value.record {
-                                    RecordTypes::ExecutionProcess(process) => {
-                                        if process.task_attempt_id == task_attempt_id {
-                                            if !show_soft_deleted && process.dropped {
-                                                let remove_patch =
-                                                    execution_process_patch::remove(process.id);
-                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
-                                            }
-                                            return Some(Ok(LogMsg::JsonPatch(patch)));
+                                && let RecordTypes::ExecutionProcess(process) = &event_patch.value.record
+                                    && process.task_attempt_id == task_attempt_id {
+                                        if !show_soft_deleted && process.dropped {
+                                            let remove_patch =
+                                                execution_process_patch::remove(process.id);
+                                            return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                         }
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
                                     }
-                                    _ => {}
-                                }
-                            }
                         }
                         None
                     }
