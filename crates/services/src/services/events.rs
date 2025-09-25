@@ -891,18 +891,19 @@ impl EventService {
                             && let Ok(event_patch) =
                                 serde_json::from_value::<EventPatch>(event_patch_value)
                             && let RecordTypes::FollowUpDraft(draft) = &event_patch.value.record
-                                && draft.task_attempt_id == task_attempt_id {
-                                    // Build a direct patch to replace /follow_up_draft
-                                    let direct = json!([
-                                        {
-                                            "op": "replace",
-                                            "path": "/follow_up_draft",
-                                            "value": draft
-                                        }
-                                    ]);
-                                    let direct_patch = serde_json::from_value(direct).unwrap();
-                                    return Some(Ok(LogMsg::JsonPatch(direct_patch)));
+                            && draft.task_attempt_id == task_attempt_id
+                        {
+                            // Build a direct patch to replace /follow_up_draft
+                            let direct = json!([
+                                {
+                                    "op": "replace",
+                                    "path": "/follow_up_draft",
+                                    "value": draft
                                 }
+                            ]);
+                            let direct_patch = serde_json::from_value(direct).unwrap();
+                            return Some(Ok(LogMsg::JsonPatch(direct_patch)));
+                        }
                         None
                     }
                     Ok(other) => Some(Ok(other)),
