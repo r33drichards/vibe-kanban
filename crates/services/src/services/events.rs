@@ -1,7 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
 use anyhow::Error as AnyhowError;
-use sqlx::ValueRef;
 use db::{
     DBService,
     models::{
@@ -14,7 +13,7 @@ use futures::StreamExt;
 use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{Error as SqlxError, SqlitePool, sqlite::SqliteOperation};
+use sqlx::{Error as SqlxError, SqlitePool, ValueRef, sqlite::SqliteOperation};
 use strum_macros::{Display, EnumString};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -254,18 +253,22 @@ impl EventService {
                 handle.set_preupdate_hook({
                     let msg_store_for_preupdate = msg_store_for_hook.clone();
                     move |preupdate: sqlx::sqlite::PreupdateHookResult<'_>| {
-                        if preupdate.table == "tasks" 
-                            && preupdate.operation == sqlx::sqlite::SqliteOperation::Delete {
-                            // Extract task ID from old column values before deletion  
-                            if let Ok(id_value) = preupdate.get_old_column_value(0) {
-                                if !id_value.is_null() {
+                        if preupdate.table == "tasks"
+                            && preupdate.operation == sqlx::sqlite::SqliteOperation::Delete
+                        {
+                            // Extract task ID from old column values before deletion
+                            if let Ok(id_value) = preupdate.get_old_column_value(0)
+                                && !id_value.is_null() {
                                     // Decode UUID from SQLite value
-                                    if let Ok(task_id) = <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(id_value) {
+                                    if let Ok(task_id) =
+                                        <uuid::Uuid as sqlx::Decode<'_, sqlx::Sqlite>>::decode(
+                                            id_value,
+                                        )
+                                    {
                                         let patch = task_patch::remove(task_id);
                                         msg_store_for_preupdate.push_patch(patch);
                                     }
                                 }
-                            }
                         }
                     }
                 });
