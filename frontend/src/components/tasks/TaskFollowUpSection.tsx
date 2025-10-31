@@ -41,6 +41,7 @@ import { useFollowUpSend } from '@/hooks/follow-up/useFollowUpSend';
 import { useDefaultVariant } from '@/hooks/follow-up/useDefaultVariant';
 import { buildResolveConflictsInstructions } from '@/lib/conflicts';
 import { appendImageMarkdown } from '@/utils/markdownImages';
+import { useTranslation } from 'react-i18next';
 
 interface TaskFollowUpSectionProps {
   task: TaskWithAttemptStatus;
@@ -53,6 +54,8 @@ export function TaskFollowUpSection({
   selectedAttemptId,
   jumpToLogsTab,
 }: TaskFollowUpSectionProps) {
+  const { t } = useTranslation('tasks');
+
   const { isAttemptRunning, stopExecution, isStopping, processes } =
     useAttemptExecution(selectedAttemptId, task.id);
   const { data: branchStatus, refetch: refetchBranchStatus } =
@@ -410,7 +413,7 @@ export function TaskFollowUpSection({
     selectedAttemptId && (
       <div
         className={cn(
-          'border-t p-4 focus-within:ring ring-inset',
+          'p-4 focus-within:ring ring-inset',
           isRetryActive && 'opacity-50'
         )}
       >
@@ -448,8 +451,10 @@ export function TaskFollowUpSection({
 
             {/* Review comments preview */}
             {reviewMarkdown && (
-              <div className="text-sm mb-4">
-                <div className="whitespace-pre-wrap">{reviewMarkdown}</div>
+              <div className="mb-4">
+                <div className="text-sm whitespace-pre-wrap break-words max-h-[40vh] overflow-y-auto rounded-md border bg-muted p-3">
+                  {reviewMarkdown}
+                </div>
               </div>
             )}
 
@@ -478,8 +483,8 @@ export function TaskFollowUpSection({
                   isQueued
                     ? 'Type your follow-up… It will auto-send when ready.'
                     : reviewMarkdown || conflictResolutionInstructions
-                      ? '(Optional) Add additional instructions... Type @ to search files.'
-                      : 'Continue working on this task attempt... Type @ to search files.'
+                      ? '(Optional) Add additional instructions... Type @ to insert tags or search files.'
+                      : 'Continue working on this task attempt... Type @ to insert tags or search files.'
                 }
                 value={followUpMessage}
                 onChange={(value) => {
@@ -538,7 +543,7 @@ export function TaskFollowUpSection({
                     ) : (
                       <>
                         <StopCircle className="h-4 w-4 mr-2" />
-                        Stop
+                        {t('followUp.stop')}
                       </>
                     )}
                   </Button>
@@ -551,7 +556,7 @@ export function TaskFollowUpSection({
                         variant="destructive"
                         disabled={!isEditable}
                       >
-                        Clear Review Comments
+                        {t('followUp.clearReviewComments')}
                       </Button>
                     )}
                     <Button
@@ -571,8 +576,8 @@ export function TaskFollowUpSection({
                         <>
                           <Send className="h-4 w-4 mr-2" />
                           {conflictResolutionInstructions
-                            ? 'Resolve conflicts'
-                            : 'Send'}
+                            ? t('followUp.resolveConflicts')
+                            : t('followUp.send')}
                         </>
                       )}
                     </Button>
@@ -595,10 +600,10 @@ export function TaskFollowUpSection({
                         {isUnqueuing ? (
                           <>
                             <Loader2 className="animate-spin h-4 w-4 mr-2" />
-                            Unqueuing…
+                            {t('followUp.unqueuing')}
                           </>
                         ) : (
-                          'Edit'
+                          t('followUp.edit')
                         )}
                       </Button>
                     )}
@@ -644,18 +649,18 @@ export function TaskFollowUpSection({
                         isUnqueuing ? (
                           <>
                             <Loader2 className="animate-spin h-4 w-4 mr-2" />
-                            Unqueuing…
+                            {t('followUp.unqueuing')}
                           </>
                         ) : (
-                          'Edit'
+                          t('followUp.edit')
                         )
                       ) : isQueuing ? (
                         <>
                           <Loader2 className="animate-spin h-4 w-4 mr-2" />
-                          Queuing…
+                          {t('followUp.queuing')}
                         </>
                       ) : (
-                        'Queue for next turn'
+                        t('followUp.queueForNextTurn')
                       )}
                     </Button>
                   </div>

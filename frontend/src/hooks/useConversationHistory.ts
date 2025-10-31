@@ -9,7 +9,7 @@ import {
   TaskAttempt,
   ToolStatus,
 } from 'shared/types';
-import { useExecutionProcesses } from './useExecutionProcesses';
+import { useExecutionProcessesContext } from '@/contexts/ExecutionProcessesContext';
 import { useEffect, useMemo, useRef } from 'react';
 import { streamJsonPatchEntries } from '@/utils/streamJsonPatchEntries';
 
@@ -50,13 +50,43 @@ interface UseConversationHistoryResult {}
 const MIN_INITIAL_ENTRIES = 10;
 const REMAINING_BATCH_SIZE = 50;
 
+const loadingPatch: PatchTypeWithKey = {
+  type: 'NORMALIZED_ENTRY',
+  content: {
+    entry_type: {
+      type: 'loading',
+    },
+    content: '',
+    timestamp: null,
+  },
+  patchKey: 'loading',
+  executionProcessId: '',
+};
+
+const nextActionPatch: (
+  failed: boolean,
+  execution_processes: number
+) => PatchTypeWithKey = (failed, execution_processes) => ({
+  type: 'NORMALIZED_ENTRY',
+  content: {
+    entry_type: {
+      type: 'next_action',
+      failed: failed,
+      execution_processes: execution_processes,
+    },
+    content: '',
+    timestamp: null,
+  },
+  patchKey: 'next_action',
+  executionProcessId: '',
+});
+
 export const useConversationHistory = ({
   attempt,
   onEntriesUpdated,
 }: UseConversationHistoryParams): UseConversationHistoryResult => {
-  const { executionProcesses: executionProcessesRaw } = useExecutionProcesses(
-    attempt.id
-  );
+  const { executionProcessesVisible: executionProcessesRaw } =
+    useExecutionProcessesContext();
   const executionProcesses = useRef<ExecutionProcess[]>(executionProcessesRaw);
   const displayedExecutionProcesses = useRef<ExecutionProcessStateStore>({});
   const loadedInitialEntries = useRef(false);
@@ -75,7 +105,12 @@ export const useConversationHistory = ({
 
   // Keep executionProcesses up to date
   useEffect(() => {
-    executionProcesses.current = executionProcessesRaw;
+    executionProcesses.current = executionProcessesRaw.filter(
+      (ep) =>
+        ep.run_reason === 'setupscript' ||
+        ep.run_reason === 'cleanupscript' ||
+        ep.run_reason === 'codingagent'
+    );
   }, [executionProcessesRaw]);
 
   const loadEntriesForHistoricExecutionProcess = (
@@ -198,22 +233,14 @@ export const useConversationHistory = ({
       .flatMap((p) => p.entries);
   };
 
-  const loadingPatch: PatchTypeWithKey = {
-    type: 'NORMALIZED_ENTRY',
-    content: {
-      entry_type: {
-        type: 'loading',
-      },
-      content: '',
-      timestamp: null,
-    },
-    patchKey: 'loading',
-    executionProcessId: '',
-  };
-
   const flattenEntriesForEmit = (
     executionProcessState: ExecutionProcessStateStore
   ): PatchTypeWithKey[] => {
+    // Flags to control Next Action bar emit
+    let hasPendingApproval = false;
+    let hasRunningProcess = false;
+    let lastProcessFailedOrKilled = false;
+
     // Create user messages + tool calls for setup/cleanup scripts
     const allEntries = Object.values(executionProcessState)
       .sort(
@@ -223,7 +250,7 @@ export const useConversationHistory = ({
           ).getTime() -
           new Date(b.executionProcess.created_at as unknown as string).getTime()
       )
-      .flatMap((p) => {
+      .flatMap((p, index) => {
         const entries: PatchTypeWithKey[] = [];
         if (
           p.executionProcess.executor_action.typ.type ===
@@ -266,10 +293,31 @@ export const useConversationHistory = ({
             );
           });
 
+          if (hasPendingApprovalEntry) {
+            hasPendingApproval = true;
+          }
+
           entries.push(...entriesExcludingUser);
+
+          const liveProcessStatus = getLiveExecutionProcess(
+            p.executionProcess.id
+          )?.status;
           const isProcessRunning =
-            getLiveExecutionProcess(p.executionProcess.id)?.status ===
-            ExecutionProcessStatus.running;
+            liveProcessStatus === ExecutionProcessStatus.running;
+          const processFailedOrKilled =
+            liveProcessStatus === ExecutionProcessStatus.failed ||
+            liveProcessStatus === ExecutionProcessStatus.killed;
+
+          if (isProcessRunning) {
+            hasRunningProcess = true;
+          }
+
+          if (
+            processFailedOrKilled &&
+            index === Object.keys(executionProcessState).length - 1
+          ) {
+            lastProcessFailedOrKilled = true;
+          }
 
           if (isProcessRunning && !hasPendingApprovalEntry) {
             entries.push(loadingPatch);
@@ -293,6 +341,18 @@ export const useConversationHistory = ({
           const executionProcess = getLiveExecutionProcess(
             p.executionProcess.id
           );
+
+          if (executionProcess?.status === ExecutionProcessStatus.running) {
+            hasRunningProcess = true;
+          }
+
+          if (
+            (executionProcess?.status === ExecutionProcessStatus.failed ||
+              executionProcess?.status === ExecutionProcessStatus.killed) &&
+            index === Object.keys(executionProcessState).length - 1
+          ) {
+            lastProcessFailedOrKilled = true;
+          }
 
           const exitCode = Number(executionProcess?.exit_code) || 0;
           const exit_status: CommandExitStatus | null =
@@ -344,6 +404,16 @@ export const useConversationHistory = ({
 
         return entries;
       });
+
+    // Emit the next action bar if no process running
+    if (!hasRunningProcess && !hasPendingApproval) {
+      allEntries.push(
+        nextActionPatch(
+          lastProcessFailedOrKilled,
+          Object.keys(executionProcessState).length
+        )
+      );
+    }
 
     return allEntries;
   };
@@ -503,8 +573,12 @@ export const useConversationHistory = ({
     if (!activeProcess) return;
 
     if (!displayedExecutionProcesses.current[activeProcess.id]) {
+      const runningOrInitial =
+        Object.keys(displayedExecutionProcesses.current).length > 1
+          ? 'running'
+          : 'initial';
       ensureProcessVisible(activeProcess);
-      emitEntries(displayedExecutionProcesses.current, 'running', false);
+      emitEntries(displayedExecutionProcesses.current, runningOrInitial, false);
     }
 
     if (

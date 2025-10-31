@@ -1,57 +1,54 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::{path::Path, process::Stdio, sync::Arc};
+// SDK submodules
+pub mod client;
+pub mod protocol;
+pub mod types;
+
+use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
 use command_group::AsyncCommandGroup;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt, process::Command, sync::OnceCell};
+use tokio::process::Command;
 use ts_rs::TS;
 use workspace_utils::{
-    approvals::APPROVAL_TIMEOUT_SECONDS,
+    approvals::ApprovalStatus,
     diff::{concatenate_diff_hunks, create_unified_diff, create_unified_diff_hunk},
     log_msg::LogMsg,
     msg_store::MsgStore,
     path::make_path_relative,
-    port_file::read_port_file,
     shell::get_shell_command,
 };
 
+use self::{client::ClaudeAgentClient, protocol::ProtocolPeer, types::PermissionMode};
 use crate::{
+    approvals::ExecutorApprovalService,
     command::{CmdOverrides, CommandBuilder, apply_overrides},
-    executors::{AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
+    executors::{
+        AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        codex::client::LogWriter,
+    },
     logs::{
         ActionType, FileChange, NormalizedEntry, NormalizedEntryType, TodoItem, ToolStatus,
         stderr_processor::normalize_stderr_logs,
         utils::{EntryIndexProvider, patch::ConversationPatch},
     },
+    stdout_dup::create_stdout_pipe_writer,
 };
-
-static BACKEND_PORT: OnceCell<u16> = OnceCell::const_new();
-async fn get_backend_port() -> std::io::Result<u16> {
-    BACKEND_PORT
-        .get_or_try_init(|| async { read_port_file("vibe-kanban").await })
-        .await
-        .copied()
-}
-
-const CONFIRM_HOOK_SCRIPT: &str = include_str!("./hooks/confirm.py");
-
-/// Natural language marker we add in our Python hook to denote user feedback
-/// This marker is added by our confirm.py hook script and is robust to Claude Code format changes
-const USER_FEEDBACK_MARKER: &str = "User feedback: ";
 
 fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.58 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.0.11"
+        "npx -y @anthropic-ai/claude-code@2.0.17"
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+use derivative::Derivative;
+
+#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[derivative(Debug, PartialEq)]
 pub struct ClaudeCode {
     #[serde(default)]
     pub append_prompt: AppendPrompt,
@@ -67,6 +64,11 @@ pub struct ClaudeCode {
     pub dangerously_skip_permissions: Option<bool>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
+
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    approvals_service: Option<Arc<dyn ExecutorApprovalService>>,
 }
 
 impl ClaudeCode {
@@ -87,78 +89,75 @@ impl ClaudeCode {
         if plan && approvals {
             tracing::warn!("Both plan and approvals are enabled. Plan will take precedence.");
         }
-
-        if plan {
-            builder = builder.extend_params(["--permission-mode=plan"]);
-        }
-
         if plan || approvals {
-            match settings_json(plan).await {
-                // TODO: Avoid quoting
-                Ok(settings) => match shlex::try_quote(&settings) {
-                    Ok(quoted) => {
-                        builder = builder.extend_params(["--settings", &quoted]);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to quote approvals JSON for --settings: {e}");
-                    }
-                },
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to generate approvals JSON. Not running approvals: {e}"
-                    );
-                }
-            }
+            // Enable bypass at startup, otherwise we cannot change to it after exiting plan mode
+            builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
+            builder = builder.extend_params([format!(
+                "--permission-mode={}",
+                PermissionMode::BypassPermissions
+            )]);
         }
-
         if self.dangerously_skip_permissions.unwrap_or(false) {
             builder = builder.extend_params(["--dangerously-skip-permissions"]);
         }
         if let Some(model) = &self.model {
             builder = builder.extend_params(["--model", model]);
         }
-        builder = builder.extend_params(["--verbose", "--output-format=stream-json"]);
+        builder = builder.extend_params([
+            "--verbose",
+            "--output-format=stream-json",
+            "--input-format=stream-json",
+            "--include-partial-messages",
+        ]);
 
         apply_overrides(builder, &self.cmd)
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        if self.plan.unwrap_or(false) {
+            PermissionMode::Plan
+        } else if self.approvals.unwrap_or(false) {
+            PermissionMode::Default
+        } else {
+            PermissionMode::BypassPermissions
+        }
+    }
+
+    pub fn get_hooks(&self) -> Option<serde_json::Value> {
+        if self.plan.unwrap_or(false) {
+            Some(serde_json::json!({
+                "PreToolUse": [
+                    {
+                        "matcher": "^ExitPlanMode$",
+                        "hookCallbackIds": ["tool_approval"],
+                    }
+                ]
+            }))
+        } else if self.approvals.unwrap_or(false) {
+            Some(serde_json::json!({
+                "PreToolUse": [
+                    {
+                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite)$).*",
+                        "hookCallbackIds": ["tool_approval"],
+                    }
+                ]
+            }))
+        } else {
+            None
+        }
     }
 }
 
 #[async_trait]
 impl StandardCodingAgentExecutor for ClaudeCode {
+    fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
+        self.approvals_service = Some(approvals);
+    }
+
     async fn spawn(&self, current_dir: &Path, prompt: &str) -> Result<SpawnedChild, ExecutorError> {
-        let (shell_cmd, shell_arg) = get_shell_command();
         let command_builder = self.build_command_builder().await;
-        let mut base_command = command_builder.build_initial();
-
-        if self.plan.unwrap_or(false) {
-            base_command = create_watchkill_script(&base_command);
-        }
-
-        if self.approvals.unwrap_or(false) || self.plan.unwrap_or(false) {
-            write_python_hook(current_dir).await?
-        }
-
-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
-
-        let mut command = Command::new(shell_cmd);
-        command
-            .kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(current_dir)
-            .arg(shell_arg)
-            .arg(&base_command);
-
-        let mut child = command.group_spawn()?;
-
-        // Feed the prompt in, then close the pipe so Claude sees EOF
-        if let Some(mut stdin) = child.inner().stdin.take() {
-            stdin.write_all(combined_prompt.as_bytes()).await?;
-            stdin.shutdown().await?;
-        }
-
-        Ok(child.into())
+        let base_command = command_builder.build_initial();
+        self.spawn_internal(current_dir, prompt, base_command).await
     }
 
     async fn spawn_follow_up(
@@ -167,44 +166,13 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         prompt: &str,
         session_id: &str,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (shell_cmd, shell_arg) = get_shell_command();
         let command_builder = self.build_command_builder().await;
-        // Build follow-up command with --resume {session_id}
-        let mut base_command = command_builder.build_follow_up(&[
+        let base_command = command_builder.build_follow_up(&[
             "--fork-session".to_string(),
             "--resume".to_string(),
             session_id.to_string(),
         ]);
-
-        if self.plan.unwrap_or(false) {
-            base_command = create_watchkill_script(&base_command);
-        }
-
-        if self.approvals.unwrap_or(false) || self.plan.unwrap_or(false) {
-            write_python_hook(current_dir).await?
-        }
-
-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
-
-        let mut command = Command::new(shell_cmd);
-        command
-            .kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(current_dir)
-            .arg(shell_arg)
-            .arg(&base_command);
-
-        let mut child = command.group_spawn()?;
-
-        // Feed the followup prompt in, then close the pipe
-        if let Some(mut stdin) = child.inner().stdin.take() {
-            stdin.write_all(combined_prompt.as_bytes()).await?;
-            stdin.shutdown().await?;
-        }
-
-        Ok(child.into())
+        self.spawn_internal(current_dir, prompt, base_command).await
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, current_dir: &Path) {
@@ -228,116 +196,74 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     }
 }
 
-async fn write_python_hook(current_dir: &Path) -> Result<(), ExecutorError> {
-    let hooks_dir = current_dir.join(".claude").join("hooks");
-    tokio::fs::create_dir_all(&hooks_dir).await?;
-    let hook_path = hooks_dir.join("confirm.py");
+impl ClaudeCode {
+    async fn spawn_internal(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        base_command: String,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let (shell_cmd, shell_arg) = get_shell_command();
+        let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
-    let mut file = tokio::fs::File::create(&hook_path).await?;
-    file.write_all(CONFIRM_HOOK_SCRIPT.as_bytes()).await?;
-    file.flush().await?;
+        let mut command = Command::new(shell_cmd);
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(current_dir)
+            .arg(shell_arg)
+            .arg(&base_command);
 
-    // TODO: Handle Windows permissioning
-    #[cfg(unix)]
-    {
-        let perm = std::fs::Permissions::from_mode(0o755);
-        tokio::fs::set_permissions(&hook_path, perm).await?;
+        let mut child = command.group_spawn()?;
+        let child_stdout = child.inner().stdout.take().ok_or_else(|| {
+            ExecutorError::Io(std::io::Error::other("Claude Code missing stdout"))
+        })?;
+        let child_stdin =
+            child.inner().stdin.take().ok_or_else(|| {
+                ExecutorError::Io(std::io::Error::other("Claude Code missing stdin"))
+            })?;
+
+        let new_stdout = create_stdout_pipe_writer(&mut child)?;
+        let permission_mode = self.permission_mode();
+        let hooks = self.get_hooks();
+
+        // Spawn task to handle the SDK client with control protocol
+        let prompt_clone = combined_prompt.clone();
+        let approvals_clone = self.approvals_service.clone();
+        tokio::spawn(async move {
+            let log_writer = LogWriter::new(new_stdout);
+            let client = ClaudeAgentClient::new(log_writer.clone(), approvals_clone);
+            let protocol_peer = ProtocolPeer::spawn(child_stdin, child_stdout, client.clone());
+
+            // Initialize control protocol
+            if let Err(e) = protocol_peer.initialize(hooks).await {
+                tracing::error!("Failed to initialize control protocol: {e}");
+                let _ = log_writer
+                    .log_raw(&format!("Error: Failed to initialize - {e}"))
+                    .await;
+                return;
+            }
+
+            if let Err(e) = protocol_peer.set_permission_mode(permission_mode).await {
+                tracing::warn!("Failed to set permission mode to {permission_mode}: {e}");
+            }
+
+            // Send user message
+            if let Err(e) = protocol_peer.send_user_message(prompt_clone).await {
+                tracing::error!("Failed to send prompt: {e}");
+                let _ = log_writer
+                    .log_raw(&format!("Error: Failed to send prompt - {e}"))
+                    .await;
+            }
+        });
+
+        Ok(SpawnedChild {
+            child,
+            exit_signal: None,
+        })
     }
-
-    // ignore the confirm.py script
-    let gitignore_path = hooks_dir.join(".gitignore");
-    if !tokio::fs::try_exists(&gitignore_path).await? {
-        let mut gitignore_file = tokio::fs::File::create(&gitignore_path).await?;
-        gitignore_file
-            .write_all(b"confirm.py\n.gitignore\n")
-            .await?;
-        gitignore_file.flush().await?;
-    }
-
-    Ok(())
-}
-
-// Configure settings json
-async fn settings_json(plan: bool) -> Result<String, std::io::Error> {
-    let backend_port = get_backend_port().await?;
-    let backend_timeout = APPROVAL_TIMEOUT_SECONDS + 5; // add buffer
-
-    let matcher = if plan {
-        "^ExitPlanMode$"
-    } else {
-        "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite)$).*"
-    };
-
-    Ok(serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": matcher,
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": format!("$CLAUDE_PROJECT_DIR/.claude/hooks/confirm.py --timeout-seconds {backend_timeout} --poll-interval 5 --backend-port {backend_port} --feedback-marker '{USER_FEEDBACK_MARKER}'"),
-                            "timeout": backend_timeout + 10
-                       }
-                    ]
-                }
-            ]
-        }
-    })
-    .to_string())
-}
-
-fn create_watchkill_script(command: &str) -> String {
-    // Hack: we concatenate so that Claude doesn't trigger the watchkill when reading this file
-    // during development, since it contains the stop phrase
-    let claude_plan_stop_indicator = concat!("Approval ", "request timed out");
-    let cmd = shlex::try_quote(command).unwrap().to_string();
-
-    format!(
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-
-word="{claude_plan_stop_indicator}"
-
-exit_code=0
-while IFS= read -r line; do
-    printf '%s\n' "$line"
-    if [[ $line == *"$word"* ]]; then
-        exit 0
-    fi
-done < <(bash -lc {cmd} <&0 2>&1)
-
-exit_code=${{PIPESTATUS[0]}}
-exit "$exit_code"
-"#
-    )
-}
-
-/// Extract user denial reason from tool result error messages
-/// Our confirm.py hook prefixes user feedback with "User feedback: " for easy extraction
-/// Supports both string content and Claude's array format: [{"type":"text","text":"..."}]
-fn extract_denial_reason(content: &serde_json::Value) -> Option<String> {
-    // First try to parse as string
-    let content_str = if let Some(s) = content.as_str() {
-        s.to_string()
-    } else if let Ok(items) =
-        serde_json::from_value::<Vec<ClaudeToolResultTextItem>>(content.clone())
-    {
-        // Handle array format: [{"type":"text","text":"..."}]
-        items
-            .into_iter()
-            .map(|item| item.text)
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        // Try to serialize the value as a string
-        content.to_string()
-    };
-
-    content_str
-        .split_once(USER_FEEDBACK_MARKER)
-        .map(|(_, rest)| rest.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,9 +278,11 @@ pub enum HistoryStrategy {
 pub struct ClaudeLogProcessor {
     model_name: Option<String>,
     // Map tool_use_id -> structured info for follow-up ToolResult replacement
-    tool_map: std::collections::HashMap<String, ClaudeToolCallInfo>,
+    tool_map: HashMap<String, ClaudeToolCallInfo>,
     // Strategy controlling how to handle history and user messages
     strategy: HistoryStrategy,
+    streaming_messages: HashMap<String, StreamingMessageState>,
+    streaming_message_id: Option<String>,
 }
 
 impl ClaudeLogProcessor {
@@ -366,8 +294,10 @@ impl ClaudeLogProcessor {
     fn new_with_strategy(strategy: HistoryStrategy) -> Self {
         Self {
             model_name: None,
-            tool_map: std::collections::HashMap::new(),
+            tool_map: HashMap::new(),
             strategy,
+            streaming_messages: HashMap::new(),
+            streaming_message_id: None,
         }
     }
 
@@ -425,339 +355,13 @@ impl ClaudeLogProcessor {
                                 session_id_extracted = true;
                             }
 
-                            // Special handling to capture tool_use ids and replace with results later
-                            match &claude_json {
-                                ClaudeJson::Assistant { message, .. } => {
-                                    // Inject system init with model if first time
-                                    if processor.model_name.is_none()
-                                        && let Some(model) = message.model.as_ref()
-                                    {
-                                        processor.model_name = Some(model.clone());
-                                        let entry = NormalizedEntry {
-                                            timestamp: None,
-                                            entry_type: NormalizedEntryType::SystemMessage,
-                                            content: format!(
-                                                "System initialized with model: {model}"
-                                            ),
-                                            metadata: None,
-                                        };
-                                        let id = entry_index_provider.next();
-                                        msg_store.push_patch(
-                                            ConversationPatch::add_normalized_entry(id, entry),
-                                        );
-                                    }
-
-                                    for item in &message.content {
-                                        match item {
-                                            ClaudeContentItem::ToolUse { id, tool_data } => {
-                                                let tool_name = tool_data.get_name().to_string();
-                                                let action_type = Self::extract_action_type(
-                                                    tool_data,
-                                                    &worktree_path,
-                                                );
-                                                let content_text = Self::generate_concise_content(
-                                                    tool_data,
-                                                    &action_type,
-                                                    &worktree_path,
-                                                );
-                                                let entry = NormalizedEntry {
-                                                    timestamp: None,
-                                                    entry_type: NormalizedEntryType::ToolUse {
-                                                        tool_name: tool_name.clone(),
-                                                        action_type,
-                                                        status: ToolStatus::Created,
-                                                    },
-                                                    content: content_text.clone(),
-                                                    metadata: Some(
-                                                        serde_json::to_value(item)
-                                                            .unwrap_or(serde_json::Value::Null),
-                                                    ),
-                                                };
-                                                let id_num = entry_index_provider.next();
-                                                processor.tool_map.insert(
-                                                    id.clone(),
-                                                    ClaudeToolCallInfo {
-                                                        entry_index: id_num,
-                                                        tool_name: tool_name.clone(),
-                                                        tool_data: tool_data.clone(),
-                                                        content: content_text.clone(),
-                                                    },
-                                                );
-                                                msg_store.push_patch(
-                                                    ConversationPatch::add_normalized_entry(
-                                                        id_num, entry,
-                                                    ),
-                                                );
-                                            }
-                                            ClaudeContentItem::Text { .. }
-                                            | ClaudeContentItem::Thinking { .. } => {
-                                                if let Some(entry) =
-                                                    Self::content_item_to_normalized_entry(
-                                                        item,
-                                                        "assistant",
-                                                        &worktree_path,
-                                                    )
-                                                {
-                                                    let id = entry_index_provider.next();
-                                                    msg_store.push_patch(
-                                                        ConversationPatch::add_normalized_entry(
-                                                            id, entry,
-                                                        ),
-                                                    );
-                                                }
-                                            }
-                                            ClaudeContentItem::ToolResult { .. } => {
-                                                // handled via User or Assistant ToolResult messages below
-                                            }
-                                        }
-                                    }
-                                }
-                                ClaudeJson::User { message, .. } => {
-                                    // Amp resume hack: if AmpResume and the user message contains plain text,
-                                    // clear all previous entries so UI shows only fresh context, and emit user text.
-                                    if matches!(processor.strategy, HistoryStrategy::AmpResume)
-                                        && message
-                                            .content
-                                            .iter()
-                                            .any(|c| matches!(c, ClaudeContentItem::Text { .. }))
-                                    {
-                                        let cur = entry_index_provider.current();
-                                        if cur > 0 {
-                                            for _ in 0..cur {
-                                                msg_store.push_patch(
-                                                    ConversationPatch::remove_diff(0.to_string()),
-                                                );
-                                            }
-                                            entry_index_provider.reset();
-                                            // Also reset tool map to avoid mismatches with re-streamed tool_use/tool_result ids
-                                            processor.tool_map.clear();
-                                        }
-                                        // Emit user text messages after clearing
-                                        for item in &message.content {
-                                            if let ClaudeContentItem::Text { text } = item {
-                                                let entry = NormalizedEntry {
-                                                    timestamp: None,
-                                                    entry_type: NormalizedEntryType::UserMessage,
-                                                    content: text.clone(),
-                                                    metadata: Some(
-                                                        serde_json::to_value(item)
-                                                            .unwrap_or(serde_json::Value::Null),
-                                                    ),
-                                                };
-                                                let id = entry_index_provider.next();
-                                                msg_store.push_patch(
-                                                    ConversationPatch::add_normalized_entry(
-                                                        id, entry,
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    for item in &message.content {
-                                        if let ClaudeContentItem::ToolResult {
-                                            tool_use_id,
-                                            content,
-                                            is_error,
-                                        } = item
-                                            && let Some(info) =
-                                                processor.tool_map.get(tool_use_id).cloned()
-                                        {
-                                            let is_command = matches!(
-                                                info.tool_data,
-                                                ClaudeToolData::Bash { .. }
-                                            );
-
-                                            // Capture the display name for user feedback
-                                            let display_tool_name = if is_command {
-                                                info.tool_name.clone()
-                                            } else {
-                                                // For non-command tools, use the same label logic as below
-                                                let raw_name =
-                                                    info.tool_data.get_name().to_string();
-                                                if raw_name.starts_with("mcp__") {
-                                                    let parts: Vec<&str> =
-                                                        raw_name.split("__").collect();
-                                                    if parts.len() >= 3 {
-                                                        format!("mcp:{}:{}", parts[1], parts[2])
-                                                    } else {
-                                                        raw_name
-                                                    }
-                                                } else {
-                                                    raw_name
-                                                }
-                                            };
-
-                                            if is_command {
-                                                // For bash commands, attach result as CommandRun output where possible
-                                                // Prefer parsing Amp's claude-compatible Bash format: {"output":"...","exitCode":0}
-                                                let content_str = if let Some(s) = content.as_str()
-                                                {
-                                                    s.to_string()
-                                                } else {
-                                                    content.to_string()
-                                                };
-
-                                                let result = if let Ok(result) =
-                                                    serde_json::from_str::<AmpBashResult>(
-                                                        &content_str,
-                                                    ) {
-                                                    Some(crate::logs::CommandRunResult {
-
-                                                        exit_status : Some(
-                                                            crate::logs::CommandExitStatus::ExitCode {
-                                                                code: result.exit_code,
-                                                            },
-                                                        ),
-                                                        output: Some(result.output)
-                                                    })
-                                                } else {
-                                                    Some(crate::logs::CommandRunResult {
-                                                        exit_status: (*is_error).map(|is_error| {
-                                                            crate::logs::CommandExitStatus::Success { success: !is_error }
-                                                        }),
-                                                        output: Some(content_str)
-                                                    })
-                                                };
-
-                                                let status = if is_error.unwrap_or(false) {
-                                                    ToolStatus::Failed
-                                                } else {
-                                                    ToolStatus::Success
-                                                };
-
-                                                let entry = NormalizedEntry {
-                                                    timestamp: None,
-                                                    entry_type: NormalizedEntryType::ToolUse {
-                                                        tool_name: info.tool_name.clone(),
-                                                        action_type: ActionType::CommandRun {
-                                                            command: info.content.clone(),
-                                                            result,
-                                                        },
-                                                        status,
-                                                    },
-                                                    content: info.content.clone(),
-                                                    metadata: None,
-                                                };
-                                                msg_store.push_patch(ConversationPatch::replace(
-                                                    info.entry_index,
-                                                    entry,
-                                                ));
-                                            } else {
-                                                // Show args and results for NotebookEdit and MCP tools
-                                                let tool_name =
-                                                    info.tool_data.get_name().to_string();
-                                                if matches!(
-                                                    info.tool_data,
-                                                    ClaudeToolData::Unknown { .. }
-                                                        | ClaudeToolData::Oracle { .. }
-                                                        | ClaudeToolData::Mermaid { .. }
-                                                        | ClaudeToolData::CodebaseSearchAgent { .. }
-                                                        | ClaudeToolData::NotebookEdit { .. }
-                                                ) {
-                                                    let (res_type, res_value) =
-                                                        Self::normalize_claude_tool_result_value(
-                                                            content,
-                                                        );
-
-                                                    // Arguments: prefer input for MCP unknown, else full struct
-                                                    // Arguments: prefer `input` field if present, derived from tool_data
-                                                    let args_to_show =
-                                                        serde_json::to_value(&info.tool_data)
-                                                            .ok()
-                                                            .and_then(|v| {
-                                                                serde_json::from_value::<
-                                                                    ClaudeToolWithInput,
-                                                                >(
-                                                                    v
-                                                                )
-                                                                .ok()
-                                                            })
-                                                            .map(|w| w.input)
-                                                            .unwrap_or(serde_json::Value::Null);
-
-                                                    // Normalize MCP label
-                                                    let is_mcp = tool_name.starts_with("mcp__");
-                                                    let label = if is_mcp {
-                                                        let parts: Vec<&str> =
-                                                            tool_name.split("__").collect();
-                                                        if parts.len() >= 3 {
-                                                            format!("mcp:{}:{}", parts[1], parts[2])
-                                                        } else {
-                                                            tool_name.clone()
-                                                        }
-                                                    } else {
-                                                        tool_name.clone()
-                                                    };
-
-                                                    let status = if is_error.unwrap_or(false) {
-                                                        ToolStatus::Failed
-                                                    } else {
-                                                        ToolStatus::Success
-                                                    };
-
-                                                    let entry = NormalizedEntry {
-                                                        timestamp: None,
-                                                        entry_type: NormalizedEntryType::ToolUse {
-                                                            tool_name: label.clone(),
-                                                            action_type: ActionType::Tool {
-                                                                tool_name: label,
-                                                                arguments: Some(args_to_show),
-                                                                result: Some(
-                                                                    crate::logs::ToolResult {
-                                                                        r#type: res_type,
-                                                                        value: res_value,
-                                                                    },
-                                                                ),
-                                                            },
-                                                            status,
-                                                        },
-                                                        content: info.content.clone(),
-                                                        metadata: None,
-                                                    };
-                                                    msg_store.push_patch(
-                                                        ConversationPatch::replace(
-                                                            info.entry_index,
-                                                            entry,
-                                                        ),
-                                                    );
-                                                }
-                                            }
-
-                                            // Check if this is a denial with user feedback (for both command and non-command tools)
-                                            if is_error.unwrap_or(false)
-                                                && let Some(denial_reason) =
-                                                    extract_denial_reason(content)
-                                            {
-                                                let user_feedback = NormalizedEntry {
-                                                    timestamp: None,
-                                                    entry_type: NormalizedEntryType::UserFeedback {
-                                                        denied_tool: display_tool_name.clone(),
-                                                    },
-                                                    content: denial_reason,
-                                                    metadata: None,
-                                                };
-                                                msg_store.push_patch(
-                                                    ConversationPatch::add_normalized_entry(
-                                                        entry_index_provider.next(),
-                                                        user_feedback,
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // Convert to normalized entries and create patches for other kinds
-                                    for entry in
-                                        processor.normalize_entries(&claude_json, &worktree_path)
-                                    {
-                                        let patch_id = entry_index_provider.next();
-                                        let patch = ConversationPatch::add_normalized_entry(
-                                            patch_id, entry,
-                                        );
-                                        msg_store.push_patch(patch);
-                                    }
-                                }
+                            let patches = processor.normalize_entries(
+                                &claude_json,
+                                &worktree_path,
+                                &entry_index_provider,
+                            );
+                            for patch in patches {
+                                msg_store.push_patch(patch);
                             }
                         }
                         Err(_) => {
@@ -807,7 +411,9 @@ impl ClaudeLogProcessor {
             ClaudeJson::User { session_id, .. } => session_id.clone(),
             ClaudeJson::ToolUse { session_id, .. } => session_id.clone(),
             ClaudeJson::ToolResult { session_id, .. } => session_id.clone(),
+            ClaudeJson::StreamEvent { session_id, .. } => session_id.clone(),
             ClaudeJson::Result { session_id, .. } => session_id.clone(),
+            ClaudeJson::ApprovalResponse { .. } => None,
             ClaudeJson::Unknown { .. } => None,
         }
     }
@@ -827,158 +433,6 @@ impl ClaudeLogProcessor {
                 })
             }
             _ => None,
-        }
-    }
-
-    /// Convert Claude JSON to normalized entries
-    fn normalize_entries(
-        &mut self,
-        claude_json: &ClaudeJson,
-        worktree_path: &str,
-    ) -> Vec<NormalizedEntry> {
-        match claude_json {
-            ClaudeJson::System {
-                subtype,
-                api_key_source,
-                ..
-            } => {
-                let mut entries = Vec::new();
-
-                // 1) emit billing warning if required
-                if let Some(warning) = Self::warn_if_unmanaged_key(api_key_source) {
-                    entries.push(warning);
-                }
-
-                // 2) keep the existing behaviour for the normal system message
-                match subtype.as_deref() {
-                    Some("init") => {
-                        // Skip system init messages because it doesn't contain the actual model that will be used in assistant messages in case of claude-code-router.
-                        // We'll send system initialized message with first assistant message that has a model field.
-                        return entries; // only the warning (if any)
-                    }
-                    Some(subtype) => {
-                        let content = format!("System: {subtype}");
-                        entries.push(NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content,
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
-                            ),
-                        });
-                    }
-                    None => {
-                        let content = "System message".to_string();
-                        entries.push(NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content,
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
-                            ),
-                        });
-                    }
-                }
-
-                entries
-            }
-            ClaudeJson::Assistant { message, .. } => {
-                let mut entries = Vec::new();
-
-                if self.model_name.is_none()
-                    && let Some(model) = message.model.as_ref()
-                {
-                    self.model_name = Some(model.clone());
-                    entries.push(NormalizedEntry {
-                        timestamp: None,
-                        entry_type: NormalizedEntryType::SystemMessage,
-                        content: format!("System initialized with model: {model}"),
-                        metadata: None,
-                    });
-                }
-
-                for content_item in &message.content {
-                    if let Some(entry) = Self::content_item_to_normalized_entry(
-                        content_item,
-                        "assistant",
-                        worktree_path,
-                    ) {
-                        entries.push(entry);
-                    }
-                }
-                entries
-            }
-            ClaudeJson::User { .. } => {
-                vec![]
-            }
-            ClaudeJson::ToolUse { tool_data, .. } => {
-                let tool_name = tool_data.get_name();
-                let action_type = Self::extract_action_type(tool_data, worktree_path);
-                let content =
-                    Self::generate_concise_content(tool_data, &action_type, worktree_path);
-
-                vec![NormalizedEntry {
-                    timestamp: None,
-                    entry_type: NormalizedEntryType::ToolUse {
-                        tool_name: tool_name.to_string(),
-                        action_type,
-                        status: ToolStatus::Created,
-                    },
-                    content,
-                    metadata: Some(
-                        serde_json::to_value(claude_json).unwrap_or(serde_json::Value::Null),
-                    ),
-                }]
-            }
-            ClaudeJson::ToolResult { .. } => {
-                // TODO: Add proper ToolResult support to NormalizedEntry when the type system supports it
-                vec![]
-            }
-            ClaudeJson::Result {
-                subtype: _,
-                is_error,
-                duration_ms: _,
-                result: _,
-                error: _,
-                num_turns: _,
-                ..
-            } => {
-                // Only handle Result messages for AmpResume strategy
-                if !matches!(self.strategy, HistoryStrategy::AmpResume) {
-                    return vec![];
-                }
-
-                // Determine if this is an error
-                let is_err = is_error.unwrap_or(false);
-
-                // Skip non-error results to avoid noise
-                if !is_err {
-                    return vec![];
-                }
-
-                vec![NormalizedEntry {
-                    timestamp: None,
-                    entry_type: NormalizedEntryType::ErrorMessage,
-                    content: serde_json::to_string(claude_json)
-                        .unwrap_or_else(|_| "error".to_string()),
-                    metadata: Some(
-                        serde_json::to_value(claude_json).unwrap_or(serde_json::Value::Null),
-                    ),
-                }]
-            }
-            ClaudeJson::Unknown { data } => {
-                vec![NormalizedEntry {
-                    timestamp: None,
-                    entry_type: NormalizedEntryType::SystemMessage,
-                    content: format!(
-                        "Unrecognized JSON message: {}",
-                        serde_json::to_value(data).unwrap_or_default()
-                    ),
-                    metadata: None,
-                }]
-            }
         }
     }
 
@@ -1049,11 +503,21 @@ impl ClaudeLogProcessor {
                     serde_json::to_value(content_item).unwrap_or(serde_json::Value::Null),
                 ),
             }),
-            ClaudeContentItem::ToolUse { tool_data, .. } => {
+            ClaudeContentItem::ToolUse { tool_data, id } => {
                 let name = tool_data.get_name();
                 let action_type = Self::extract_action_type(tool_data, worktree_path);
                 let content =
                     Self::generate_concise_content(tool_data, &action_type, worktree_path);
+
+                // Create metadata with tool_call_id for approval matching
+                let mut metadata =
+                    serde_json::to_value(content_item).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = metadata.as_object_mut() {
+                    obj.insert(
+                        "tool_call_id".to_string(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                }
 
                 Some(NormalizedEntry {
                     timestamp: None,
@@ -1063,9 +527,7 @@ impl ClaudeLogProcessor {
                         status: ToolStatus::Created,
                     },
                     content,
-                    metadata: Some(
-                        serde_json::to_value(content_item).unwrap_or(serde_json::Value::Null),
-                    ),
+                    metadata: Some(metadata),
                 })
             }
             ClaudeContentItem::ToolResult { .. } => {
@@ -1228,6 +690,456 @@ impl ClaudeLogProcessor {
         }
     }
 
+    /// Convert Claude JSON to normalized patches
+    fn normalize_entries(
+        &mut self,
+        claude_json: &ClaudeJson,
+        worktree_path: &str,
+        entry_index_provider: &EntryIndexProvider,
+    ) -> Vec<json_patch::Patch> {
+        let mut patches = Vec::new();
+        match claude_json {
+            ClaudeJson::System {
+                subtype,
+                api_key_source,
+                ..
+            } => {
+                // emit billing warning if required
+                if let Some(warning) = Self::warn_if_unmanaged_key(api_key_source) {
+                    let idx = entry_index_provider.next();
+                    patches.push(ConversationPatch::add_normalized_entry(idx, warning));
+                }
+
+                // keep the existing behaviour for the normal system message
+                match subtype.as_deref() {
+                    Some("init") => {
+                        // Skip system init messages because it doesn't contain the actual model that will be used in assistant messages in case of claude-code-router.
+                        // We'll send system initialized message with first assistant message that has a model field.
+                    }
+                    Some(subtype) => {
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::SystemMessage,
+                            content: format!("System: {subtype}"),
+                            metadata: Some(
+                                serde_json::to_value(claude_json)
+                                    .unwrap_or(serde_json::Value::Null),
+                            ),
+                        };
+                        let idx = entry_index_provider.next();
+                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
+                    None => {
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::SystemMessage,
+                            content: "System message".to_string(),
+                            metadata: Some(
+                                serde_json::to_value(claude_json)
+                                    .unwrap_or(serde_json::Value::Null),
+                            ),
+                        };
+                        let idx = entry_index_provider.next();
+                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
+                }
+            }
+            ClaudeJson::Assistant { message, .. } => {
+                if let Some(patch) = extract_model_name(self, message, entry_index_provider) {
+                    patches.push(patch);
+                }
+
+                let mut streaming_message_state = message
+                    .id
+                    .as_ref()
+                    .and_then(|id| self.streaming_messages.remove(id));
+
+                for (content_index, item) in message.content.iter().enumerate() {
+                    let entry_index = streaming_message_state
+                        .as_mut()
+                        .and_then(|state| state.content_entry_index(content_index));
+
+                    match item {
+                        ClaudeContentItem::ToolUse { id, tool_data } => {
+                            let tool_name = tool_data.get_name().to_string();
+                            let action_type = Self::extract_action_type(tool_data, worktree_path);
+                            let content_text = Self::generate_concise_content(
+                                tool_data,
+                                &action_type,
+                                worktree_path,
+                            );
+
+                            // Create metadata with tool_call_id for approval matching
+                            let mut metadata =
+                                serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
+                            if let Some(obj) = metadata.as_object_mut() {
+                                obj.insert(
+                                    "tool_call_id".to_string(),
+                                    serde_json::Value::String(id.clone()),
+                                );
+                            }
+
+                            let entry = NormalizedEntry {
+                                timestamp: None,
+                                entry_type: NormalizedEntryType::ToolUse {
+                                    tool_name: tool_name.clone(),
+                                    action_type,
+                                    status: ToolStatus::Created,
+                                },
+                                content: content_text.clone(),
+                                metadata: Some(metadata),
+                            };
+                            let is_new = entry_index.is_none();
+                            let id_num = entry_index.unwrap_or_else(|| entry_index_provider.next());
+                            self.tool_map.insert(
+                                id.clone(),
+                                ClaudeToolCallInfo {
+                                    entry_index: id_num,
+                                    tool_name: tool_name.clone(),
+                                    tool_data: tool_data.clone(),
+                                    content: content_text,
+                                },
+                            );
+                            let patch = if is_new {
+                                ConversationPatch::add_normalized_entry(id_num, entry)
+                            } else {
+                                ConversationPatch::replace(id_num, entry)
+                            };
+                            patches.push(patch);
+                        }
+                        ClaudeContentItem::Text { .. } | ClaudeContentItem::Thinking { .. } => {
+                            if let Some(entry) = Self::content_item_to_normalized_entry(
+                                item,
+                                &message.role,
+                                worktree_path,
+                            ) {
+                                let is_new = entry_index.is_none();
+                                let idx =
+                                    entry_index.unwrap_or_else(|| entry_index_provider.next());
+                                let patch = if is_new {
+                                    ConversationPatch::add_normalized_entry(idx, entry)
+                                } else {
+                                    ConversationPatch::replace(idx, entry)
+                                };
+                                patches.push(patch);
+                            }
+                        }
+                        ClaudeContentItem::ToolResult { .. } => {}
+                    }
+                }
+            }
+            ClaudeJson::User { message, .. } => {
+                if matches!(self.strategy, HistoryStrategy::AmpResume)
+                    && message
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, ClaudeContentItem::Text { .. }))
+                {
+                    let cur = entry_index_provider.current();
+                    if cur > 0 {
+                        for _ in 0..cur {
+                            patches.push(ConversationPatch::remove_diff(0.to_string()));
+                        }
+                        entry_index_provider.reset();
+                        self.tool_map.clear();
+                    }
+
+                    for item in &message.content {
+                        if let ClaudeContentItem::Text { text } = item {
+                            let entry = NormalizedEntry {
+                                timestamp: None,
+                                entry_type: NormalizedEntryType::UserMessage,
+                                content: text.clone(),
+                                metadata: Some(
+                                    serde_json::to_value(item).unwrap_or(serde_json::Value::Null),
+                                ),
+                            };
+                            let id = entry_index_provider.next();
+                            patches.push(ConversationPatch::add_normalized_entry(id, entry));
+                        }
+                    }
+                }
+
+                for item in &message.content {
+                    if let ClaudeContentItem::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = item
+                        && let Some(info) = self.tool_map.get(tool_use_id).cloned()
+                    {
+                        let is_command = matches!(info.tool_data, ClaudeToolData::Bash { .. });
+
+                        let _display_tool_name = if is_command {
+                            info.tool_name.clone()
+                        } else {
+                            let raw_name = info.tool_data.get_name().to_string();
+                            if raw_name.starts_with("mcp__") {
+                                let parts: Vec<&str> = raw_name.split("__").collect();
+                                if parts.len() >= 3 {
+                                    format!("mcp:{}:{}", parts[1], parts[2])
+                                } else {
+                                    raw_name
+                                }
+                            } else {
+                                raw_name
+                            }
+                        };
+
+                        if is_command {
+                            let content_str = if let Some(s) = content.as_str() {
+                                s.to_string()
+                            } else {
+                                content.to_string()
+                            };
+
+                            let result = if let Ok(result) =
+                                serde_json::from_str::<AmpBashResult>(&content_str)
+                            {
+                                Some(crate::logs::CommandRunResult {
+                                    exit_status: Some(crate::logs::CommandExitStatus::ExitCode {
+                                        code: result.exit_code,
+                                    }),
+                                    output: Some(result.output),
+                                })
+                            } else {
+                                Some(crate::logs::CommandRunResult {
+                                    exit_status: (*is_error).map(|is_error| {
+                                        crate::logs::CommandExitStatus::Success {
+                                            success: !is_error,
+                                        }
+                                    }),
+                                    output: Some(content_str),
+                                })
+                            };
+
+                            let status = if is_error.unwrap_or(false) {
+                                ToolStatus::Failed
+                            } else {
+                                ToolStatus::Success
+                            };
+
+                            let entry = NormalizedEntry {
+                                timestamp: None,
+                                entry_type: NormalizedEntryType::ToolUse {
+                                    tool_name: info.tool_name.clone(),
+                                    action_type: ActionType::CommandRun {
+                                        command: info.content.clone(),
+                                        result,
+                                    },
+                                    status,
+                                },
+                                content: info.content.clone(),
+                                metadata: None,
+                            };
+                            patches.push(ConversationPatch::replace(info.entry_index, entry));
+                        } else if matches!(
+                            info.tool_data,
+                            ClaudeToolData::Unknown { .. }
+                                | ClaudeToolData::Oracle { .. }
+                                | ClaudeToolData::Mermaid { .. }
+                                | ClaudeToolData::CodebaseSearchAgent { .. }
+                                | ClaudeToolData::NotebookEdit { .. }
+                        ) {
+                            let (res_type, res_value) =
+                                Self::normalize_claude_tool_result_value(content);
+
+                            let args_to_show = serde_json::to_value(&info.tool_data)
+                                .ok()
+                                .and_then(|v| serde_json::from_value::<ClaudeToolWithInput>(v).ok())
+                                .map(|w| w.input)
+                                .unwrap_or(serde_json::Value::Null);
+
+                            let tool_name = info.tool_data.get_name().to_string();
+                            let is_mcp = tool_name.starts_with("mcp__");
+                            let label = if is_mcp {
+                                let parts: Vec<&str> = tool_name.split("__").collect();
+                                if parts.len() >= 3 {
+                                    format!("mcp:{}:{}", parts[1], parts[2])
+                                } else {
+                                    tool_name.clone()
+                                }
+                            } else {
+                                tool_name.clone()
+                            };
+
+                            let status = if is_error.unwrap_or(false) {
+                                ToolStatus::Failed
+                            } else {
+                                ToolStatus::Success
+                            };
+
+                            let entry = NormalizedEntry {
+                                timestamp: None,
+                                entry_type: NormalizedEntryType::ToolUse {
+                                    tool_name: label.clone(),
+                                    action_type: ActionType::Tool {
+                                        tool_name: label,
+                                        arguments: Some(args_to_show),
+                                        result: Some(crate::logs::ToolResult {
+                                            r#type: res_type,
+                                            value: res_value,
+                                        }),
+                                    },
+                                    status,
+                                },
+                                content: info.content.clone(),
+                                metadata: None,
+                            };
+                            patches.push(ConversationPatch::replace(info.entry_index, entry));
+                        }
+                        // Note: With control protocol, denials are handled via protocol messages
+                        // rather than error content parsing
+                    }
+                }
+            }
+            ClaudeJson::ToolUse { tool_data, .. } => {
+                let tool_name = tool_data.get_name();
+                let action_type = Self::extract_action_type(tool_data, worktree_path);
+                let content =
+                    Self::generate_concise_content(tool_data, &action_type, worktree_path);
+
+                let entry = NormalizedEntry {
+                    timestamp: None,
+                    entry_type: NormalizedEntryType::ToolUse {
+                        tool_name: tool_name.to_string(),
+                        action_type,
+                        status: ToolStatus::Created,
+                    },
+                    content,
+                    metadata: Some(
+                        serde_json::to_value(claude_json).unwrap_or(serde_json::Value::Null),
+                    ),
+                };
+                let idx = entry_index_provider.next();
+                patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+            }
+            ClaudeJson::ToolResult { .. } => {
+                // Add proper ToolResult support to NormalizedEntry when the type system supports it
+            }
+            ClaudeJson::StreamEvent { event, .. } => match event {
+                ClaudeStreamEvent::MessageStart { message } => {
+                    if message.role == "assistant" {
+                        if let Some(patch) = extract_model_name(self, message, entry_index_provider)
+                        {
+                            patches.push(patch);
+                        }
+
+                        if let Some(message_id) = message.id.clone() {
+                            self.streaming_messages.insert(
+                                message_id.clone(),
+                                StreamingMessageState::new(message.role.clone()),
+                            );
+                            self.streaming_message_id = Some(message_id);
+                        } else {
+                            self.streaming_message_id = None;
+                        }
+                    } else {
+                        self.streaming_message_id = None;
+                    }
+                }
+                ClaudeStreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                } => {
+                    if let Some(state) = self
+                        .streaming_message_id
+                        .as_ref()
+                        .and_then(|id| self.streaming_messages.get_mut(id))
+                    {
+                        state.content_block_start(*index, content_block.clone());
+                    }
+                }
+                ClaudeStreamEvent::ContentBlockDelta { index, delta } => {
+                    if let Some(state) = self
+                        .streaming_message_id
+                        .as_ref()
+                        .and_then(|id| self.streaming_messages.get_mut(id))
+                        && let Some(patch) = state.apply_content_block_delta(
+                            *index,
+                            delta,
+                            worktree_path,
+                            entry_index_provider,
+                        )
+                    {
+                        patches.push(patch);
+                    }
+                }
+                ClaudeStreamEvent::ContentBlockStop { .. } => {}
+                ClaudeStreamEvent::MessageDelta { .. } => {}
+                ClaudeStreamEvent::MessageStop => {
+                    if let Some(message_id) = self.streaming_message_id.take() {
+                        let _ = self.streaming_messages.remove(&message_id);
+                    }
+                }
+                ClaudeStreamEvent::Unknown => {}
+            },
+            ClaudeJson::Result { is_error, .. } => {
+                if matches!(self.strategy, HistoryStrategy::AmpResume) && is_error.unwrap_or(false)
+                {
+                    let entry = NormalizedEntry {
+                        timestamp: None,
+                        entry_type: NormalizedEntryType::ErrorMessage,
+                        content: serde_json::to_string(claude_json)
+                            .unwrap_or_else(|_| "error".to_string()),
+                        metadata: Some(
+                            serde_json::to_value(claude_json).unwrap_or(serde_json::Value::Null),
+                        ),
+                    };
+                    let idx = entry_index_provider.next();
+                    patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                }
+            }
+            ClaudeJson::ApprovalResponse {
+                call_id: _,
+                tool_name,
+                approval_status,
+            } => {
+                // Convert denials and timeouts to visible entries (matching Codex behavior)
+                let entry_opt = match approval_status {
+                    ApprovalStatus::Pending => None,
+                    ApprovalStatus::Approved => None,
+                    ApprovalStatus::Denied { reason } => Some(NormalizedEntry {
+                        timestamp: None,
+                        entry_type: NormalizedEntryType::UserFeedback {
+                            denied_tool: tool_name.clone(),
+                        },
+                        content: reason
+                            .as_ref()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "User denied this tool use request".to_string()),
+                        metadata: None,
+                    }),
+                    ApprovalStatus::TimedOut => Some(NormalizedEntry {
+                        timestamp: None,
+                        entry_type: NormalizedEntryType::ErrorMessage,
+                        content: format!("Approval timed out for tool {tool_name}"),
+                        metadata: None,
+                    }),
+                };
+
+                if let Some(entry) = entry_opt {
+                    let idx = entry_index_provider.next();
+                    patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                }
+            }
+            ClaudeJson::Unknown { data } => {
+                let entry = NormalizedEntry {
+                    timestamp: None,
+                    entry_type: NormalizedEntryType::SystemMessage,
+                    content: format!(
+                        "Unrecognized JSON message: {}",
+                        serde_json::to_value(data).unwrap_or_default()
+                    ),
+                    metadata: None,
+                };
+                let idx = entry_index_provider.next();
+                patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+            }
+        }
+        patches
+    }
     /// Generate concise, readable content for tool usage using structured data
     fn generate_concise_content(
         tool_data: &ClaudeToolData,
@@ -1322,8 +1234,165 @@ impl ClaudeLogProcessor {
     }
 }
 
+fn extract_model_name(
+    processor: &mut ClaudeLogProcessor,
+    message: &ClaudeMessage,
+    entry_index_provider: &EntryIndexProvider,
+) -> Option<json_patch::Patch> {
+    if processor.model_name.is_none()
+        && let Some(model) = message.model.as_ref()
+    {
+        processor.model_name = Some(model.clone());
+        let entry = NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::SystemMessage,
+            content: format!("System initialized with model: {model}"),
+            metadata: None,
+        };
+        let id = entry_index_provider.next();
+        Some(ConversationPatch::add_normalized_entry(id, entry))
+    } else {
+        None
+    }
+}
+
+struct StreamingMessageState {
+    role: String,
+    contents: HashMap<usize, StreamingContentState>,
+}
+
+impl StreamingMessageState {
+    fn new(role: String) -> Self {
+        Self {
+            role,
+            contents: HashMap::new(),
+        }
+    }
+
+    fn content_block_start(&mut self, index: usize, content_block: ClaudeContentItem) {
+        if let Some(state) = StreamingContentState::from_content_block(content_block) {
+            self.contents.insert(index, state);
+        }
+    }
+
+    fn apply_content_block_delta(
+        &mut self,
+        index: usize,
+        delta: &ClaudeContentBlockDelta,
+        worktree_path: &str,
+        entry_index_provider: &EntryIndexProvider,
+    ) -> Option<json_patch::Patch> {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.contents.entry(index) {
+            let new_state = StreamingContentState::from_delta(delta)?;
+            e.insert(new_state);
+        }
+
+        let entry_state = self.contents.get_mut(&index)?;
+        entry_state.apply_content_delta(delta);
+
+        let content_item = entry_state.to_content_item();
+        let entry = ClaudeLogProcessor::content_item_to_normalized_entry(
+            &content_item,
+            &self.role,
+            worktree_path,
+        )?;
+
+        if let Some(existing_index) = entry_state.entry_index {
+            Some(ConversationPatch::replace(existing_index, entry))
+        } else {
+            let entry_index = entry_index_provider.next();
+            entry_state.entry_index = Some(entry_index);
+            Some(ConversationPatch::add_normalized_entry(entry_index, entry))
+        }
+    }
+
+    fn content_entry_index(&self, content_index: usize) -> Option<usize> {
+        self.contents
+            .get(&content_index)
+            .and_then(|s| s.entry_index)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamingContentKind {
+    Text,
+    Thinking,
+}
+
+struct StreamingContentState {
+    kind: StreamingContentKind,
+    buffer: String,
+    entry_index: Option<usize>,
+}
+
+impl StreamingContentState {
+    fn from_content_block(content_block: ClaudeContentItem) -> Option<Self> {
+        match content_block {
+            ClaudeContentItem::Text { text } => Some(Self {
+                kind: StreamingContentKind::Text,
+                buffer: text,
+                entry_index: None,
+            }),
+            ClaudeContentItem::Thinking { thinking } => Some(Self {
+                kind: StreamingContentKind::Thinking,
+                buffer: thinking,
+                entry_index: None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn from_delta(delta: &ClaudeContentBlockDelta) -> Option<Self> {
+        match delta {
+            ClaudeContentBlockDelta::TextDelta { .. } => Some(Self {
+                kind: StreamingContentKind::Text,
+                buffer: String::new(),
+                entry_index: None,
+            }),
+            ClaudeContentBlockDelta::ThinkingDelta { .. } => Some(Self {
+                kind: StreamingContentKind::Thinking,
+                buffer: String::new(),
+                entry_index: None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn apply_content_delta(&mut self, delta: &ClaudeContentBlockDelta) {
+        match (self.kind, delta) {
+            (StreamingContentKind::Text, ClaudeContentBlockDelta::TextDelta { text }) => {
+                self.buffer.push_str(text);
+            }
+            (
+                StreamingContentKind::Thinking,
+                ClaudeContentBlockDelta::ThinkingDelta { thinking },
+            ) => {
+                self.buffer.push_str(thinking);
+            }
+            _ => {
+                tracing::warn!(
+                    "Mismatched content types: delta {:?}, kind {:?}",
+                    delta,
+                    self.kind
+                );
+            }
+        }
+    }
+
+    fn to_content_item(&self) -> ClaudeContentItem {
+        match self.kind {
+            StreamingContentKind::Text => ClaudeContentItem::Text {
+                text: self.buffer.clone(),
+            },
+            StreamingContentKind::Thinking => ClaudeContentItem::Thinking {
+                thinking: self.buffer.clone(),
+            },
+        }
+    }
+}
+
 // Data structures for parsing Claude's JSON output format
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum ClaudeJson {
     #[serde(rename = "system")]
@@ -1359,6 +1428,16 @@ pub enum ClaudeJson {
         is_error: Option<bool>,
         session_id: Option<String>,
     },
+    #[serde(rename = "stream_event")]
+    StreamEvent {
+        event: ClaudeStreamEvent,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        uuid: Option<String>,
+    },
     #[serde(rename = "result")]
     Result {
         #[serde(default)]
@@ -1376,11 +1455,17 @@ pub enum ClaudeJson {
         #[serde(default, alias = "sessionId")]
         session_id: Option<String>,
     },
+    #[serde(rename = "approval_response")]
+    ApprovalResponse {
+        call_id: String,
+        tool_name: String,
+        approval_status: ApprovalStatus,
+    },
     // Catch-all for unknown message types
     #[serde(untagged)]
     Unknown {
         #[serde(flatten)]
-        data: std::collections::HashMap<String, serde_json::Value>,
+        data: HashMap<String, serde_json::Value>,
     },
 }
 
@@ -1414,6 +1499,69 @@ pub enum ClaudeContentItem {
         content: serde_json::Value,
         is_error: Option<bool>,
     },
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type")]
+pub enum ClaudeStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: ClaudeMessage },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        content_block: ClaudeContentItem,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        index: usize,
+        delta: ClaudeContentBlockDelta,
+    },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop { index: usize },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        #[serde(default)]
+        delta: Option<ClaudeMessageDelta>,
+        #[serde(default)]
+        usage: Option<ClaudeUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type")]
+pub enum ClaudeContentBlockDelta {
+    #[serde(rename = "text_delta")]
+    TextDelta { text: String },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
+pub struct ClaudeMessageDelta {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub stop_sequence: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
+pub struct ClaudeUsage {
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default, rename = "cache_creation_input_tokens")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, rename = "cache_read_input_tokens")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
 }
 
 /// Structured tool data for Claude tools based on real samples
@@ -1630,6 +1778,29 @@ impl ClaudeToolData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch};
+
+    fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
+        patches
+            .iter()
+            .filter_map(|patch| extract_normalized_entry_from_patch(patch).map(|(_, entry)| entry))
+            .collect()
+    }
+
+    fn normalize_helper(
+        processor: &mut ClaudeLogProcessor,
+        json: &ClaudeJson,
+        worktree: &str,
+    ) -> Vec<NormalizedEntry> {
+        let provider = EntryIndexProvider::test_new();
+        let patches = processor.normalize_entries(json, worktree, &provider);
+        patches_to_entries(&patches)
+    }
+
+    fn normalize(json: &ClaudeJson, worktree: &str) -> Vec<NormalizedEntry> {
+        let mut processor = ClaudeLogProcessor::new();
+        normalize_helper(&mut processor, json, worktree)
+    }
 
     #[test]
     fn test_claude_json_parsing() {
@@ -1642,13 +1813,13 @@ mod tests {
             Some("abc123".to_string())
         );
 
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 0);
 
         let assistant_json = r#"
         {"type":"assistant","message":{"type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"Hi! I'm Claude Code."}]}}"#;
         let parsed: ClaudeJson = serde_json::from_str(assistant_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
 
         assert_eq!(entries.len(), 2);
         assert!(matches!(
@@ -1666,7 +1837,7 @@ mod tests {
         let assistant_json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]},"session_id":"abc123"}"#;
         let parsed: ClaudeJson = serde_json::from_str(assistant_json).unwrap();
 
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 1);
         assert!(matches!(
             entries[0].entry_type,
@@ -1680,7 +1851,7 @@ mod tests {
         let result_json = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":6059,"result":"Final result"}"#;
         let parsed: ClaudeJson = serde_json::from_str(result_json).unwrap();
 
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 0); // Should be ignored like in old implementation
     }
 
@@ -1689,7 +1860,7 @@ mod tests {
         let thinking_json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me think about this..."}]}}"#;
         let parsed: ClaudeJson = serde_json::from_str(thinking_json).unwrap();
 
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 1);
         assert!(matches!(
             entries[0].entry_type,
@@ -1799,6 +1970,7 @@ mod tests {
                 base_command_override: None,
                 additional_params: None,
             },
+            approvals_service: None,
         };
         let msg_store = Arc::new(MsgStore::new());
         let current_dir = std::path::PathBuf::from("/tmp/test-worktree");
@@ -1861,7 +2033,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(assistant_with_create).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         match &entries[0].entry_type {
             NormalizedEntryType::ToolUse { action_type, .. } => match action_type {
@@ -1882,7 +2054,7 @@ mod tests {
             }
         }"#;
         let parsed_edit: ClaudeJson = serde_json::from_str(assistant_with_edit).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed_edit, "/tmp/work");
+        let entries = normalize(&parsed_edit, "/tmp/work");
         assert_eq!(entries.len(), 1);
         match &entries[0].entry_type {
             NormalizedEntryType::ToolUse { action_type, .. } => match action_type {
@@ -1906,7 +2078,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(oracle_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Oracle: `Assess project status`");
 
@@ -1921,7 +2093,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(mermaid_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Mermaid diagram");
 
@@ -1936,7 +2108,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(csa_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Codebase search: `TODO markers`");
 
@@ -1951,7 +2123,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(undo_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Undo edit: `README.md`");
     }
@@ -1969,7 +2141,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(bash_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         // Content should display the command in backticks
         assert_eq!(entries[0].content, "`echo hello`");
@@ -1985,7 +2157,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(task_json).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Task: `Add header to README`");
     }
@@ -2007,7 +2179,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(with_desc).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Task: `Primary description`");
 
@@ -2025,7 +2197,7 @@ mod tests {
             }
         }"#;
         let parsed: ClaudeJson = serde_json::from_str(no_desc).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "/tmp/work");
+        let entries = normalize(&parsed, "/tmp/work");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Task: `Only prompt`");
     }
@@ -2042,7 +2214,7 @@ mod tests {
         );
 
         // ToolResult messages should be ignored (produce no entries) until proper support is added
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 0);
     }
 
@@ -2052,7 +2224,7 @@ mod tests {
         let parsed: ClaudeJson = serde_json::from_str(assistant_with_tool_result).unwrap();
 
         // ToolResult content items should be ignored (produce no entries) until proper support is added
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         assert_eq!(entries.len(), 0);
     }
 
@@ -2061,7 +2233,7 @@ mod tests {
         // Test with ANTHROPIC_API_KEY - should generate warning
         let system_with_env_key = r#"{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY","session_id":"test123"}"#;
         let parsed: ClaudeJson = serde_json::from_str(system_with_env_key).unwrap();
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
 
         assert_eq!(entries.len(), 1);
         assert!(matches!(
@@ -2076,21 +2248,21 @@ mod tests {
         // Test with managed API key source - should not generate warning
         let system_with_managed_key = r#"{"type":"system","subtype":"init","apiKeySource":"/login managed key","session_id":"test123"}"#;
         let parsed_managed: ClaudeJson = serde_json::from_str(system_with_managed_key).unwrap();
-        let entries_managed = ClaudeLogProcessor::new().normalize_entries(&parsed_managed, "");
+        let entries_managed = normalize(&parsed_managed, "");
 
         assert_eq!(entries_managed.len(), 0); // No warning for managed key
 
         // Test with other apiKeySource values - should not generate warning
         let system_other_key = r#"{"type":"system","subtype":"init","apiKeySource":"OTHER_KEY","session_id":"test123"}"#;
         let parsed_other: ClaudeJson = serde_json::from_str(system_other_key).unwrap();
-        let entries_other = ClaudeLogProcessor::new().normalize_entries(&parsed_other, "");
+        let entries_other = normalize(&parsed_other, "");
 
         assert_eq!(entries_other.len(), 0); // No warning for other keys
 
         // Test with missing apiKeySource - should not generate warning
         let system_no_key = r#"{"type":"system","subtype":"init","session_id":"test123"}"#;
         let parsed_no_key: ClaudeJson = serde_json::from_str(system_no_key).unwrap();
-        let entries_no_key = ClaudeLogProcessor::new().normalize_entries(&parsed_no_key, "");
+        let entries_no_key = normalize(&parsed_no_key, "");
 
         assert_eq!(entries_no_key.len(), 0); // No warning when field is missing
     }
@@ -2100,7 +2272,7 @@ mod tests {
         let complex_assistant_json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I need to read the file first"},{"type":"text","text":"I'll help you with that"},{"type":"tool_result","tool_use_id":"tool_789","content":"Success","is_error":false}]}}"#;
         let parsed: ClaudeJson = serde_json::from_str(complex_assistant_json).unwrap();
 
-        let entries = ClaudeLogProcessor::new().normalize_entries(&parsed, "");
+        let entries = normalize(&parsed, "");
         // Only thinking and text entries should be processed, tool_result ignored
         assert_eq!(entries.len(), 2);
 

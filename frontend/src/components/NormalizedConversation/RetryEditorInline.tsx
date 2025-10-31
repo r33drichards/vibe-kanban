@@ -68,6 +68,7 @@ export function RetryEditorInline({
     setImages,
     handleImageUploaded,
     clearImagesAndUploads,
+    isMessageLocallyDirty,
   } = useDraftEditor({
     draft,
     taskId: attempt.task_id,
@@ -120,7 +121,7 @@ export function RetryEditorInline({
   useEffect(() => {
     if (!isRetryLoaded || !draft) return;
     const serverPrompt = draft.prompt || '';
-    if (message === '' && serverPrompt !== '') {
+    if (message === '' && serverPrompt !== '' && !isMessageLocallyDirty()) {
       setMessage(serverPrompt);
       if (import.meta.env.DEV) {
         // One-shot debug to validate hydration ordering in dev
@@ -138,6 +139,7 @@ export function RetryEditorInline({
     isRetryLoaded,
     message,
     setMessage,
+    isMessageLocallyDirty,
   ]);
 
   const onSend = async () => {
@@ -251,7 +253,7 @@ export function RetryEditorInline({
   ]);
 
   return (
-    <div className="border rounded-md p-2 space-y-2">
+    <div className="space-y-2">
       {initError && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />

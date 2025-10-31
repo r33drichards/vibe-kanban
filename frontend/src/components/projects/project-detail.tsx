@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
+import { useNavigateWithSearch } from '@/hooks';
 import {
   Card,
   CardContent,
@@ -11,7 +11,6 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Project } from 'shared/types';
-import { showProjectForm } from '@/lib/modals';
 import { projectsApi } from '@/lib/api';
 import {
   AlertCircle,
@@ -30,7 +29,7 @@ interface ProjectDetailProps {
 }
 
 export function ProjectDetail({ projectId, onBack }: ProjectDetailProps) {
-  const navigate = useNavigate();
+  const navigate = useNavigateWithSearch();
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -70,15 +69,8 @@ export function ProjectDetail({ projectId, onBack }: ProjectDetailProps) {
     }
   };
 
-  const handleEditClick = async () => {
-    try {
-      const result = await showProjectForm({ project });
-      if (result === 'saved') {
-        fetchProject();
-      }
-    } catch (error) {
-      // User cancelled - do nothing
-    }
+  const handleEditClick = () => {
+    navigate(`/settings/projects?projectId=${projectId}`);
   };
 
   useEffect(() => {

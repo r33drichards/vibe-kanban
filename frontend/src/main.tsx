@@ -7,6 +7,9 @@ import { VibeKanbanWebCompanion } from 'vibe-kanban-web-companion';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as Sentry from '@sentry/react';
 import NiceModal from '@ebay/nice-modal-react';
+import i18n from './i18n';
+import posthog from 'posthog-js';
+import { PostHogProvider } from 'posthog-js/react';
 // Import modal type definitions
 import './types/modals';
 // Import and register modals
@@ -23,7 +26,7 @@ import {
   EditorSelectionDialog,
   DeleteTaskConfirmationDialog,
   FolderPickerDialog,
-  TaskTemplateEditDialog,
+  TagEditDialog,
   ChangeTargetBranchDialog,
   RebaseDialog,
   CreateConfigurationDialog,
@@ -31,7 +34,10 @@ import {
   ProjectFormDialog,
   ProjectEditorSelectionDialog,
   RestoreLogsDialog,
+  ViewProcessesDialog,
+  GitActionsDialog,
 } from './components/dialogs';
+import { CreateAttemptDialog } from './components/dialogs/tasks/CreateAttemptDialog';
 
 // Register modals
 NiceModal.register('github-login', GitHubLoginDialog);
@@ -46,7 +52,7 @@ NiceModal.register('delete-task-confirmation', DeleteTaskConfirmationDialog);
 NiceModal.register('task-form', TaskFormDialog);
 NiceModal.register('editor-selection', EditorSelectionDialog);
 NiceModal.register('folder-picker', FolderPickerDialog);
-NiceModal.register('task-template-edit', TaskTemplateEditDialog);
+NiceModal.register('tag-edit', TagEditDialog);
 NiceModal.register('change-target-branch-dialog', ChangeTargetBranchDialog);
 NiceModal.register('rebase-dialog', RebaseDialog);
 NiceModal.register('create-configuration', CreateConfigurationDialog);
@@ -54,8 +60,9 @@ NiceModal.register('delete-configuration', DeleteConfigurationDialog);
 NiceModal.register('project-form', ProjectFormDialog);
 NiceModal.register('project-editor-selection', ProjectEditorSelectionDialog);
 NiceModal.register('restore-logs', RestoreLogsDialog);
-// Install VS Code iframe keyboard bridge when running inside an iframe
-import './vscode/bridge';
+NiceModal.register('view-processes', ViewProcessesDialog);
+NiceModal.register('create-attempt', CreateAttemptDialog);
+NiceModal.register('git-actions', GitActionsDialog);
 
 import {
   useLocation,
@@ -80,6 +87,24 @@ Sentry.init({
 });
 Sentry.setTag('source', 'frontend');
 
+if (
+  import.meta.env.VITE_POSTHOG_API_KEY &&
+  import.meta.env.VITE_POSTHOG_API_ENDPOINT
+) {
+  posthog.init(import.meta.env.VITE_POSTHOG_API_KEY, {
+    api_host: import.meta.env.VITE_POSTHOG_API_ENDPOINT,
+    capture_pageview: false,
+    capture_pageleave: true,
+    capture_performance: true,
+    autocapture: false,
+    opt_out_capturing_by_default: true,
+  });
+} else {
+  console.warn(
+    'PostHog API key or endpoint not set. Analytics will be disabled.'
+  );
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -92,12 +117,17 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <Sentry.ErrorBoundary fallback={<p>An error has occurred</p>} showDialog>
-        <ClickToComponent />
-        <VibeKanbanWebCompanion />
-        <App />
-        {/* <ReactQueryDevtools initialIsOpen={false} /> */}
-      </Sentry.ErrorBoundary>
+      <PostHogProvider client={posthog}>
+        <Sentry.ErrorBoundary
+          fallback={<p>{i18n.t('common:states.error')}</p>}
+          showDialog
+        >
+          <ClickToComponent />
+          <VibeKanbanWebCompanion />
+          <App />
+          {/* <ReactQueryDevtools initialIsOpen={false} /> */}
+        </Sentry.ErrorBoundary>
+      </PostHogProvider>
     </QueryClientProvider>
   </React.StrictMode>
 );

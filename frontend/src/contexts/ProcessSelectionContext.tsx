@@ -1,17 +1,8 @@
-import {
-  createContext,
-  useContext,
-  useState,
-  useMemo,
-  useCallback,
-  ReactNode,
-} from 'react';
-import { useTabNavigation } from './TabNavigationContext';
+import { createContext, useContext, useState, useMemo, ReactNode } from 'react';
 
 interface ProcessSelectionContextType {
   selectedProcessId: string | null;
   setSelectedProcessId: (id: string | null) => void;
-  jumpToProcess: (processId: string) => void;
 }
 
 const ProcessSelectionContext =
@@ -19,31 +10,23 @@ const ProcessSelectionContext =
 
 interface ProcessSelectionProviderProps {
   children: ReactNode;
+  initialProcessId?: string | null;
 }
 
 export function ProcessSelectionProvider({
   children,
+  initialProcessId = null,
 }: ProcessSelectionProviderProps) {
-  const { setActiveTab } = useTabNavigation();
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(
-    null
-  );
-
-  const jumpToProcess = useCallback(
-    (processId: string) => {
-      setSelectedProcessId(processId);
-      setActiveTab('processes');
-    },
-    [setActiveTab]
+    initialProcessId
   );
 
   const value = useMemo(
     () => ({
       selectedProcessId,
       setSelectedProcessId,
-      jumpToProcess,
     }),
-    [selectedProcessId, setSelectedProcessId, jumpToProcess]
+    [selectedProcessId, setSelectedProcessId]
   );
 
   return (

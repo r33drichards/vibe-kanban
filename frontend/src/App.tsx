@@ -2,16 +2,17 @@ import { useEffect } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
-import { Navbar } from '@/components/layout/navbar';
 import { Projects } from '@/pages/projects';
 import { ProjectTasks } from '@/pages/project-tasks';
-import { useTaskViewManager } from '@/hooks/useTaskViewManager';
-import { usePreviousPath } from '@/hooks/usePreviousPath';
+import { FullAttemptLogsPage } from '@/pages/full-attempt-logs';
+import { NormalLayout } from '@/components/layout/NormalLayout';
+import { usePostHog } from 'posthog-js/react';
 
 import {
   AgentSettings,
   GeneralSettings,
   McpSettings,
+  ProjectSettings,
   SettingsLayout,
 } from '@/pages/settings/';
 import {
@@ -20,9 +21,7 @@ import {
 } from '@/components/config-provider';
 import { ThemeProvider } from '@/components/theme-provider';
 import { SearchProvider } from '@/contexts/search-context';
-import { KeyboardShortcutsProvider } from '@/contexts/keyboard-shortcuts-context';
 
-import { ShortcutsHelp } from '@/components/shortcuts-help';
 import { HotkeysProvider } from 'react-hotkeys-hook';
 
 import { ProjectProvider } from '@/contexts/project-context';
@@ -30,9 +29,6 @@ import { ThemeMode } from 'shared/types';
 import * as Sentry from '@sentry/react';
 import { Loader } from '@/components/ui/loader';
 
-import { AppWithStyleOverride } from '@/utils/style-override';
-import { WebviewContextMenu } from '@/vscode/ContextMenu';
-import { DevBanner } from '@/components/DevBanner';
 import NiceModal from '@ebay/nice-modal-react';
 import { OnboardingResult } from './components/dialogs/global/OnboardingDialog';
 import { ClickedElementsProvider } from './contexts/ClickedElementsProvider';
@@ -40,13 +36,25 @@ import { ClickedElementsProvider } from './contexts/ClickedElementsProvider';
 const SentryRoutes = Sentry.withSentryReactRouterV6Routing(Routes);
 
 function AppContent() {
-  const { config, updateAndSaveConfig, loading } = useUserSystem();
-  const { isFullscreen } = useTaskViewManager();
+  const { config, analyticsUserId, updateAndSaveConfig, loading } =
+    useUserSystem();
+  const posthog = usePostHog();
 
-  // Track previous path for back navigation
-  usePreviousPath();
+  // Handle opt-in/opt-out and user identification when config loads
+  useEffect(() => {
+    if (!posthog || !analyticsUserId) return;
 
-  const showNavbar = !isFullscreen;
+    const userOptedIn = config?.analytics_enabled !== false;
+
+    if (userOptedIn) {
+      posthog.opt_in_capturing();
+      posthog.identify(analyticsUserId);
+      console.log('[Analytics] Analytics enabled and user identified');
+    } else {
+      posthog.opt_out_capturing();
+      console.log('[Analytics] Analytics disabled by user preference');
+    }
+  }, [config?.analytics_enabled, analyticsUserId, posthog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -147,56 +155,46 @@ function AppContent() {
   return (
     <I18nextProvider i18n={i18n}>
       <ThemeProvider initialTheme={config?.theme || ThemeMode.SYSTEM}>
-        <AppWithStyleOverride>
-          <SearchProvider>
-            <div className="h-screen flex flex-col bg-background">
-              {/* Custom context menu and VS Code-friendly interactions when embedded in iframe */}
-              <WebviewContextMenu />
+        <SearchProvider>
+          <div className="h-screen flex flex-col bg-background">
+            <SentryRoutes>
+              {/* VS Code full-page logs route (outside NormalLayout for minimal UI) */}
+              <Route
+                path="/projects/:projectId/tasks/:taskId/attempts/:attemptId/full"
+                element={<FullAttemptLogsPage />}
+              />
 
-              {showNavbar && <DevBanner />}
-              {showNavbar && <Navbar />}
-              <div className="flex-1 h-full overflow-y-scroll">
-                <SentryRoutes>
-                  <Route path="/" element={<Projects />} />
-                  <Route path="/projects" element={<Projects />} />
-                  <Route path="/projects/:projectId" element={<Projects />} />
-                  <Route
-                    path="/projects/:projectId/tasks"
-                    element={<ProjectTasks />}
-                  />
-                  <Route
-                    path="/projects/:projectId/tasks/:taskId/attempts/:attemptId"
-                    element={<ProjectTasks />}
-                  />
-                  <Route
-                    path="/projects/:projectId/tasks/:taskId/attempts/:attemptId/full"
-                    element={<ProjectTasks />}
-                  />
-                  <Route
-                    path="/projects/:projectId/tasks/:taskId/full"
-                    element={<ProjectTasks />}
-                  />
-                  <Route
-                    path="/projects/:projectId/tasks/:taskId"
-                    element={<ProjectTasks />}
-                  />
-                  <Route path="/settings/*" element={<SettingsLayout />}>
-                    <Route index element={<Navigate to="general" replace />} />
-                    <Route path="general" element={<GeneralSettings />} />
-                    <Route path="agents" element={<AgentSettings />} />
-                    <Route path="mcp" element={<McpSettings />} />
-                  </Route>
-                  {/* Redirect old MCP route */}
-                  <Route
-                    path="/mcp-servers"
-                    element={<Navigate to="/settings/mcp" replace />}
-                  />
-                </SentryRoutes>
-              </div>
-            </div>
-            <ShortcutsHelp />
-          </SearchProvider>
-        </AppWithStyleOverride>
+              <Route element={<NormalLayout />}>
+                <Route path="/" element={<Projects />} />
+                <Route path="/projects" element={<Projects />} />
+                <Route path="/projects/:projectId" element={<Projects />} />
+                <Route
+                  path="/projects/:projectId/tasks"
+                  element={<ProjectTasks />}
+                />
+                <Route path="/settings/*" element={<SettingsLayout />}>
+                  <Route index element={<Navigate to="general" replace />} />
+                  <Route path="general" element={<GeneralSettings />} />
+                  <Route path="projects" element={<ProjectSettings />} />
+                  <Route path="agents" element={<AgentSettings />} />
+                  <Route path="mcp" element={<McpSettings />} />
+                </Route>
+                <Route
+                  path="/mcp-servers"
+                  element={<Navigate to="/settings/mcp" replace />}
+                />
+                <Route
+                  path="/projects/:projectId/tasks/:taskId"
+                  element={<ProjectTasks />}
+                />
+                <Route
+                  path="/projects/:projectId/tasks/:taskId/attempts/:attemptId"
+                  element={<ProjectTasks />}
+                />
+              </Route>
+            </SentryRoutes>
+          </div>
+        </SearchProvider>
       </ThemeProvider>
     </I18nextProvider>
   );
@@ -209,11 +207,9 @@ function App() {
         <ClickedElementsProvider>
           <ProjectProvider>
             <HotkeysProvider initiallyActiveScopes={['*', 'global', 'kanban']}>
-              <KeyboardShortcutsProvider>
-                <NiceModal.Provider>
-                  <AppContent />
-                </NiceModal.Provider>
-              </KeyboardShortcutsProvider>
+              <NiceModal.Provider>
+                <AppContent />
+              </NiceModal.Provider>
             </HotkeysProvider>
           </ProjectProvider>
         </ClickedElementsProvider>

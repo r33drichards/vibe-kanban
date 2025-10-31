@@ -1,66 +1,98 @@
-import { Columns, FileText } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Columns, FileText, Pilcrow } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import { useDiffViewMode, useDiffViewStore } from '@/stores/useDiffViewStore';
+import {
+  useDiffViewMode,
+  useDiffViewStore,
+  useIgnoreWhitespaceDiff,
+} from '@/stores/useDiffViewStore';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 type Props = {
   className?: string;
-  size?: 'xs' | 'sm';
 };
 
-/**
- * Segmented switch for Inline vs Split diff modes.
- * - Left segment: Inline (Unified)
- * - Right segment: Split
- * Uses global Zustand store so changing here updates all diffs.
- */
-export default function DiffViewSwitch({ className, size = 'xs' }: Props) {
+export default function DiffViewSwitch({ className }: Props) {
+  const { t } = useTranslation('tasks');
   const mode = useDiffViewMode();
   const setMode = useDiffViewStore((s) => s.setMode);
+  const ignoreWhitespace = useIgnoreWhitespaceDiff();
+  const setIgnoreWhitespace = useDiffViewStore((s) => s.setIgnoreWhitespace);
 
-  const isUnified = mode === 'unified';
+  const whitespaceValue = ignoreWhitespace ? ['ignoreWhitespace'] : [];
 
   return (
-    <div
-      className={cn(
-        'inline-flex rounded-md border border-input overflow-hidden',
-        className
-      )}
-      role="group"
-      aria-label="Diff view mode"
-    >
-      <Button
-        variant={isUnified ? 'default' : 'outline'}
-        size={size}
-        className={cn(
-          'rounded-none rounded-l-md h-6',
-          !isUnified && 'bg-background',
-          'gap-1',
-          // Highlight the inner divider when right side is active
-          !isUnified && 'border-r-foreground'
-        )}
-        aria-pressed={isUnified}
-        onClick={() => setMode('unified')}
-      >
-        <FileText className="h-3 w-3" />
-        <span className="text-[11px]">Inline</span>
-      </Button>
-      <Button
-        variant={!isUnified ? 'default' : 'outline'}
-        size={size}
-        className={cn(
-          'rounded-none rounded-r-md -ml-px h-6',
-          isUnified && 'bg-background',
-          'gap-1',
-          // Ensure inner divider reflects active left side
-          isUnified && 'border-l-foreground'
-        )}
-        aria-pressed={!isUnified}
-        onClick={() => setMode('split')}
-      >
-        <Columns className="h-3 w-3" />
-        <span className="text-[11px]">Split</span>
-      </Button>
-    </div>
+    <TooltipProvider>
+      <div className={cn('inline-flex gap-4', className)}>
+        <ToggleGroup
+          type="single"
+          value={mode ?? ''}
+          onValueChange={(v) => v && setMode(v as 'unified' | 'split')}
+          className="inline-flex gap-4"
+          aria-label="Diff view mode"
+        >
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <ToggleGroupItem
+                value="unified"
+                aria-label="Inline view"
+                active={mode === 'unified'}
+              >
+                <FileText className="h-4 w-4" />
+              </ToggleGroupItem>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {t('diff.viewModes.inline')}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <ToggleGroupItem
+                value="split"
+                aria-label="Split view"
+                active={mode === 'split'}
+              >
+                <Columns className="h-4 w-4" />
+              </ToggleGroupItem>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {t('diff.viewModes.split')}
+            </TooltipContent>
+          </Tooltip>
+        </ToggleGroup>
+
+        <ToggleGroup
+          type="multiple"
+          value={whitespaceValue}
+          onValueChange={(values) =>
+            setIgnoreWhitespace(values.includes('ignoreWhitespace'))
+          }
+          className="inline-flex gap-4"
+          aria-label={t('diff.ignoreWhitespace')}
+        >
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <ToggleGroupItem
+                value="ignoreWhitespace"
+                aria-label={t('diff.ignoreWhitespace')}
+                active={ignoreWhitespace}
+              >
+                <Pilcrow className="h-4 w-4" />
+              </ToggleGroupItem>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {t('diff.ignoreWhitespace')}
+            </TooltipContent>
+          </Tooltip>
+        </ToggleGroup>
+      </div>
+    </TooltipProvider>
   );
 }

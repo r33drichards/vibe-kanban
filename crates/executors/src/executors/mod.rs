@@ -13,8 +13,9 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
+    approvals::ExecutorApprovalService,
     executors::{
-        amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::Cursor,
+        amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
         gemini::Gemini, opencode::Opencode, qwen::QwenCode,
     },
     mcp_config::McpConfig,
@@ -52,6 +53,8 @@ pub enum ExecutorError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error(transparent)]
     TomlDeserialize(#[from] toml::de::Error),
+    #[error(transparent)]
+    ExecutorApprovalError(#[from] crate::approvals::ExecutorApprovalError),
 }
 
 #[enum_dispatch]
@@ -75,7 +78,10 @@ pub enum CodingAgent {
     Gemini,
     Codex,
     Opencode,
-    Cursor,
+    #[serde(alias = "CURSOR")]
+    #[strum_discriminants(serde(alias = "CURSOR"))]
+    #[strum_discriminants(strum(serialize = "CURSOR", serialize = "CURSOR_AGENT"))]
+    CursorAgent,
     QwenCode,
     Copilot,
 }
@@ -130,7 +136,7 @@ impl CodingAgent {
             Self::Codex(_) => vec![BaseAgentCapability::SessionFork],
             Self::Gemini(_) => vec![BaseAgentCapability::SessionFork],
             Self::QwenCode(_) => vec![BaseAgentCapability::SessionFork],
-            Self::Opencode(_) | Self::Cursor(_) | Self::Copilot(_) => vec![],
+            Self::Opencode(_) | Self::CursorAgent(_) | Self::Copilot(_) => vec![],
         }
     }
 }
@@ -138,6 +144,8 @@ impl CodingAgent {
 #[async_trait]
 #[enum_dispatch(CodingAgent)]
 pub trait StandardCodingAgentExecutor {
+    fn use_approvals(&mut self, _approvals: Arc<dyn ExecutorApprovalService>) {}
+
     async fn spawn(&self, current_dir: &Path, prompt: &str) -> Result<SpawnedChild, ExecutorError>;
     async fn spawn_follow_up(
         &self,
@@ -197,5 +205,38 @@ impl AppendPrompt {
             AppendPrompt(Some(value)) => format!("{prompt}{value}"),
             AppendPrompt(None) => prompt.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn test_cursor_agent_deserialization() {
+        // Test that CURSOR_AGENT is accepted
+        let result = BaseCodingAgent::from_str("CURSOR_AGENT");
+        assert!(result.is_ok(), "CURSOR_AGENT should be valid");
+        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+
+        // Test that legacy CURSOR is still accepted for backwards compatibility
+        let result = BaseCodingAgent::from_str("CURSOR");
+        assert!(
+            result.is_ok(),
+            "CURSOR should be valid for backwards compatibility"
+        );
+        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+
+        // Test serde deserialization for CURSOR_AGENT
+        let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR_AGENT""#);
+        assert!(result.is_ok(), "CURSOR_AGENT should deserialize via serde");
+        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+
+        // Test serde deserialization for legacy CURSOR
+        let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR""#);
+        assert!(result.is_ok(), "CURSOR should deserialize via serde");
+        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
     }
 }

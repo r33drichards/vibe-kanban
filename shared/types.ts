@@ -30,15 +30,17 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR = "CURSOR", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR": Cursor } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot };
 
-export type TaskTemplate = { id: string, project_id: string | null, title: string, description: string | null, template_name: string, created_at: string, updated_at: string, };
+export type Tag = { id: string, tag_name: string, content: string, created_at: string, updated_at: string, };
 
-export type CreateTaskTemplate = { project_id: string | null, title: string, description: string | null, template_name: string, };
+export type CreateTag = { tag_name: string, content: string, };
 
-export type UpdateTaskTemplate = { title: string | null, description: string | null, template_name: string | null, };
+export type UpdateTag = { tag_name: string | null, content: string | null, };
+
+export type TagSearchParams = { search: string | null, };
 
 export type TaskStatus = "todo" | "inprogress" | "inreview" | "done" | "cancelled";
 
@@ -58,7 +60,7 @@ export type CreateImage = { file_path: string, original_name: string, mime_type:
 
 export type ApiResponse<T, E = T> = { success: boolean, data: T | null, error_data: E | null, message: string | null, };
 
-export type UserSystemInfo = { config: Config, environment: Environment, 
+export type UserSystemInfo = { config: Config, analytics_user_id: string, environment: Environment, 
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
@@ -92,13 +94,13 @@ export type ImageResponse = { id: string, file_path: string, original_name: stri
 
 export enum GitHubServiceError { TOKEN_INVALID = "TOKEN_INVALID", INSUFFICIENT_PERMISSIONS = "INSUFFICIENT_PERMISSIONS", REPO_NOT_FOUND_OR_NO_ACCESS = "REPO_NOT_FOUND_OR_NO_ACCESS" }
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, github_login_acknowledged: boolean, telemetry_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean | null, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, };
+export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, github_login_acknowledged: boolean, telemetry_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean | null, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
 export enum ThemeMode { LIGHT = "LIGHT", DARK = "DARK", SYSTEM = "SYSTEM" }
 
-export type EditorConfig = { editor_type: EditorType, custom_command: string | null, };
+export type EditorConfig = { editor_type: EditorType, custom_command: string | null, remote_ssh_host: string | null, remote_ssh_user: string | null, };
 
 export enum EditorType { VS_CODE = "VS_CODE", CURSOR = "CURSOR", WINDSURF = "WINDSURF", INTELLI_J = "INTELLI_J", ZED = "ZED", XCODE = "XCODE", CUSTOM = "CUSTOM" }
 
@@ -106,7 +108,9 @@ export type GitHubConfig = { pat: string | null, oauth_token: string | null, use
 
 export enum SoundFile { ABSTRACT_SOUND1 = "ABSTRACT_SOUND1", ABSTRACT_SOUND2 = "ABSTRACT_SOUND2", ABSTRACT_SOUND3 = "ABSTRACT_SOUND3", ABSTRACT_SOUND4 = "ABSTRACT_SOUND4", COW_MOOING = "COW_MOOING", PHONE_VIBRATION = "PHONE_VIBRATION", ROOSTER = "ROOSTER" }
 
-export type UiLanguage = "BROWSER" | "EN" | "JA" | "ES";
+export type UiLanguage = "BROWSER" | "EN" | "JA" | "ES" | "KO";
+
+export type ShowcaseState = { seen_features: Array<string>, };
 
 export type DeviceFlowStartResponse = { user_code: string, verification_uri: string, expires_in: number, interval: number, };
 
@@ -150,7 +154,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR": Cursor } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } };
 
 export type BaseAgentCapability = "SESSION_FORK";
 
@@ -162,9 +166,11 @@ export type GeminiModel = "default" | "flash";
 
 export type Amp = { append_prompt: AppendPrompt, dangerously_allow_all?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
 
-export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, include_plan_tool?: boolean | null, include_apply_patch_tool?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
+export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, ask_for_approval?: AskForApproval | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, include_plan_tool?: boolean | null, include_apply_patch_tool?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
 
 export type SandboxMode = "auto" | "read-only" | "workspace-write" | "danger-full-access";
+
+export type AskForApproval = "unless-trusted" | "on-failure" | "on-request" | "never";
 
 export type ReasoningEffort = "low" | "medium" | "high";
 
@@ -172,7 +178,7 @@ export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 
 export type ReasoningSummaryFormat = "none" | "experimental";
 
-export type Cursor = { append_prompt: AppendPrompt, force?: boolean | null, model?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
+export type CursorAgent = { append_prompt: AppendPrompt, force?: boolean | null, model?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
 
 export type Copilot = { append_prompt: AppendPrompt, model?: string | null, allow_all_tools?: boolean | null, allow_tool?: string | null, deny_tool?: string | null, add_dir?: Array<string> | null, disable_mcp_server?: Array<string> | null, base_command_override?: string | null, additional_params?: Array<string> | null, };
 
@@ -286,7 +292,7 @@ export type CommandRunResult = { exit_status: CommandExitStatus | null, output: 
 
 export type NormalizedEntry = { timestamp: string | null, entry_type: NormalizedEntryType, content: string, };
 
-export type NormalizedEntryType = { "type": "user_message" } | { "type": "user_feedback", denied_tool: string, } | { "type": "assistant_message" } | { "type": "tool_use", tool_name: string, action_type: ActionType, status: ToolStatus, } | { "type": "system_message" } | { "type": "error_message" } | { "type": "thinking" } | { "type": "loading" };
+export type NormalizedEntryType = { "type": "user_message" } | { "type": "user_feedback", denied_tool: string, } | { "type": "assistant_message" } | { "type": "tool_use", tool_name: string, action_type: ActionType, status: ToolStatus, } | { "type": "system_message" } | { "type": "error_message" } | { "type": "thinking" } | { "type": "loading" } | { "type": "next_action", failed: boolean, execution_processes: number, };
 
 export type FileChange = { "action": "write", content: string, } | { "action": "delete" } | { "action": "rename", new_path: string, } | { "action": "edit", 
 /**
@@ -316,7 +322,7 @@ export type PatchType = { "type": "NORMALIZED_ENTRY", "content": NormalizedEntry
 
 export type ApprovalStatus = { "status": "pending" } | { "status": "approved" } | { "status": "denied", reason?: string, } | { "status": "timed_out" };
 
-export type CreateApprovalRequest = { tool_name: string, tool_input: JsonValue, session_id: string, };
+export type CreateApprovalRequest = { tool_name: string, tool_input: JsonValue, tool_call_id: string, };
 
 export type ApprovalResponse = { execution_process_id: string, status: ApprovalStatus, };
 
