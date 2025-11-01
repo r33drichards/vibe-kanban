@@ -31,7 +31,6 @@
           pnpm
           cargo-watch
           sqlx-cli
-          openssl
           git
           # For bindgen (used by libsqlite3-sys)
           llvmPackages.libclang
@@ -43,7 +42,11 @@
         # Runtime dependencies
         buildInputs = with pkgs; [
           openssl
+          openssl.dev
           sqlite
+          libgit2
+          libssh2
+          zlib
         ] ++ lib.optionals pkgs.stdenv.isDarwin [
           pkgs.darwin.apple_sdk.frameworks.Security
           pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
@@ -78,6 +81,21 @@
             # Ensure C compiler can find standard library headers
             export C_INCLUDE_PATH="${pkgs.glibc.dev}/include:${pkgs.gcc.cc}/include"
             export CPLUS_INCLUDE_PATH="${pkgs.glibc.dev}/include:${pkgs.gcc.cc}/include"
+
+            # Tell Rust -sys crates to use Nix-provided libraries instead of compiling from source
+            export OPENSSL_DIR="${pkgs.openssl.dev}"
+            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export OPENSSL_NO_VENDOR=1
+
+            export LIBGIT2_SYS_USE_PKG_CONFIG=1
+            export LIBSSH2_SYS_USE_PKG_CONFIG=1
+            export LIBSQLITE3_SYS_USE_PKG_CONFIG=1
+
+            export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.libgit2}/lib/pkgconfig:${pkgs.libssh2}/lib/pkgconfig:${pkgs.sqlite.dev}/lib/pkgconfig"
+
+            # Set up LD_LIBRARY_PATH for runtime linking
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH"
 
             # Ensure pnpm is set up
             if [ ! -d "node_modules" ]; then
