@@ -166,3 +166,15 @@ export function groupedTopologicalSort(
 
   return result;
 }
+
+/**
+ * Reverse topological sort - children appear before their parents.
+ * Child tasks are shown first, followed by their parent tasks.
+ */
+export function reverseTopologicalSort(
+  tasks: TaskWithAttemptStatus[]
+): TaskWithAttemptStatus[] {
+  // Get the normal topological sort and reverse it
+  const sorted = groupedTopologicalSort(tasks);
+  return sorted.reverse();
+}

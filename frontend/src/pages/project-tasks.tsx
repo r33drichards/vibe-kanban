@@ -14,7 +14,14 @@ import { showcases } from '@/config/showcases';
 import { useShowcaseTrigger } from '@/hooks/useShowcaseTrigger';
 import { usePostHog } from 'posthog-js/react';
 import { TagFilter } from '@/components/TagFilter';
-import { groupedTopologicalSort } from '@/lib/topologicalSort';
+import { groupedTopologicalSort, reverseTopologicalSort } from '@/lib/topologicalSort';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 import { useSearch } from '@/contexts/search-context';
 import { useProject } from '@/contexts/project-context';
@@ -154,8 +161,8 @@ export function ProjectTasks() {
   // View mode state (kanban or table)
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
 
-  // Sort mode state (creation date or topological)
-  const [sortMode, setSortMode] = useState<'date' | 'topological'>('date');
+  // Sort mode state (creation date, topological, or reverse topological)
+  const [sortMode, setSortMode] = useState<'date' | 'topological' | 'reverse-topological'>('date');
 
   const {
     tasks,
@@ -328,6 +335,8 @@ export function ProjectTasks() {
     // Apply sort mode
     if (sortMode === 'topological') {
       result = groupedTopologicalSort(result);
+    } else if (sortMode === 'reverse-topological') {
+      result = reverseTopologicalSort(result);
     }
     // Note: if sortMode is 'date', tasks are already sorted by creation date from useProjectTasks
 
@@ -686,33 +695,32 @@ export function ProjectTasks() {
             selectedTagIds={selectedTagIds}
             onTagsChange={setSelectedTagIds}
           />
-          <div className="flex items-center gap-2">
-            <ToggleGroup
-              type="single"
+          <div className="flex items-center gap-3">
+            <Select
               value={sortMode}
-              onValueChange={(value) => {
-                if (value) setSortMode(value as 'date' | 'topological');
-              }}
-              className="gap-1 bg-muted p-1 rounded-md"
+              onValueChange={(value) => setSortMode(value as 'date' | 'topological' | 'reverse-topological')}
             >
-              <ToggleGroupItem
-                value="date"
-                aria-label="Sort by date"
-                className="h-8 px-3 data-[state=on]:bg-background data-[state=on]:text-foreground text-xs"
-                title="Sort by Creation Date"
-              >
-                Date
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                value="topological"
-                aria-label="Topological sort"
-                className="h-8 px-3 data-[state=on]:bg-background data-[state=on]:text-foreground text-xs"
-                title="Sort by Parent-Child Relationships"
-              >
-                <ArrowDownUp className="h-3 w-3 mr-1" />
-                Topo
-              </ToggleGroupItem>
-            </ToggleGroup>
+              <SelectTrigger className="h-8 w-[180px] text-xs">
+                <SelectValue placeholder="Sort by..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="date">
+                  <div className="flex items-center gap-2">
+                    <span>📅 By Date</span>
+                  </div>
+                </SelectItem>
+                <SelectItem value="topological">
+                  <div className="flex items-center gap-2">
+                    <span>⬇️ Parents First</span>
+                  </div>
+                </SelectItem>
+                <SelectItem value="reverse-topological">
+                  <div className="flex items-center gap-2">
+                    <span>⬆️ Children First</span>
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
             <ToggleGroup
               type="single"
               value={viewMode}
