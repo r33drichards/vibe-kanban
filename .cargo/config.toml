@@ -11,3 +11,24 @@ rustflags = ["-C", "link-arg=/DEBUG:FASTLINK"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/DEBUG:FASTLINK"]
+
+# Build optimizations for faster development builds
+[build]
+# Use more parallel jobs for faster compilation
+jobs = 8
+
+# Incremental compilation for faster rebuilds (enabled by default for debug)
+incremental = true
+
+[profile.dev]
+# Reduce debug info to speed up compilation
+debug = 1
+# Split debuginfo reduces linker memory usage and can speed up linking
+split-debuginfo = "unpacked"
+
+[profile.dev.build-override]
+# Optimize build scripts and proc macros even in dev mode
+opt-level = 3
+
+# Note: Fast linker (lld) configuration is handled by the nix flake via RUSTFLAGS environment variable
+# This avoids conflicts with the nix environment's library paths
