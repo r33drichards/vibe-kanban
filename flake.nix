@@ -33,11 +33,15 @@
           sqlx-cli
           openssl
           git
+          llvmPackages.libclang
+          llvmPackages.libcxxClang
         ];
 
         # Runtime dependencies
         buildInputs = with pkgs; [
           openssl
+          glibc
+          glibc.dev
         ] ++ lib.optionals pkgs.stdenv.isDarwin [
           pkgs.darwin.apple_sdk.frameworks.Security
           pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
@@ -65,6 +69,9 @@
 
             # Set up environment for SQLx
             export DATABASE_URL="sqlite:dev_assets_seed/vibe-kanban.db"
+
+            # Set up libclang for bindgen (required for sqlite)
+            export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
 
             # Ensure pnpm is set up
             if [ ! -d "node_modules" ]; then
