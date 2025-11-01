@@ -14,7 +14,7 @@ import { showcases } from '@/config/showcases';
 import { useShowcaseTrigger } from '@/hooks/useShowcaseTrigger';
 import { usePostHog } from 'posthog-js/react';
 import { TagFilter } from '@/components/TagFilter';
-import { groupedTopologicalSort, reverseTopologicalSort, manualSort, saveManualOrder } from '@/lib/topologicalSort';
+import { groupedTopologicalSort, reverseTopologicalSort } from '@/lib/topologicalSort';
 import {
   Select,
   SelectContent,
@@ -161,8 +161,8 @@ export function ProjectTasks() {
   // View mode state (kanban or table)
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
 
-  // Sort mode state (creation date, topological, reverse topological, or manual)
-  const [sortMode, setSortMode] = useState<'date' | 'topological' | 'reverse-topological' | 'manual'>('date');
+  // Sort mode state (creation date, topological, or reverse topological)
+  const [sortMode, setSortMode] = useState<'date' | 'topological' | 'reverse-topological'>('date');
 
   const {
     tasks,
@@ -337,13 +337,11 @@ export function ProjectTasks() {
       result = groupedTopologicalSort(result);
     } else if (sortMode === 'reverse-topological') {
       result = reverseTopologicalSort(result);
-    } else if (sortMode === 'manual' && projectId) {
-      result = manualSort(result, projectId);
     }
     // Note: if sortMode is 'date', tasks are already sorted by creation date from useProjectTasks
 
     return result;
-  }, [tasks, searchQuery, selectedTagIds, sortMode, projectId]);
+  }, [tasks, searchQuery, selectedTagIds, sortMode]);
 
   const groupedFilteredTasks = useMemo(() => {
     const groups: Record<string, Task[]> = {};
@@ -615,31 +613,22 @@ export function ProjectTasks() {
       const draggedTaskId = active.id as string;
       const newStatus = over.id as Task['status'];
       const task = tasksById[draggedTaskId];
+      if (!task || task.status === newStatus) return;
 
-      // If task status changed, update it
-      if (task && task.status !== newStatus) {
-        try {
-          await tasksApi.update(draggedTaskId, {
-            title: task.title,
-            description: task.description,
-            status: newStatus,
-            parent_task_attempt: task.parent_task_attempt,
-            image_ids: null,
-            tag_ids: null,
-          });
-        } catch (err) {
-          console.error('Failed to update task status:', err);
-        }
-      }
-
-      // If in manual sort mode, save the new order
-      if (sortMode === 'manual' && projectId) {
-        // Get all task IDs in their current visual order
-        const allTaskIds = filteredTasks.map((t) => t.id);
-        saveManualOrder(allTaskIds, projectId);
+      try {
+        await tasksApi.update(draggedTaskId, {
+          title: task.title,
+          description: task.description,
+          status: newStatus,
+          parent_task_attempt: task.parent_task_attempt,
+          image_ids: null,
+          tag_ids: null,
+        });
+      } catch (err) {
+        console.error('Failed to update task status:', err);
       }
     },
-    [tasksById, sortMode, projectId, filteredTasks]
+    [tasksById]
   );
 
   const isInitialTasksLoad = isLoading && tasks.length === 0;
@@ -709,7 +698,7 @@ export function ProjectTasks() {
           <div className="flex items-center gap-3">
             <Select
               value={sortMode}
-              onValueChange={(value) => setSortMode(value as 'date' | 'topological' | 'reverse-topological' | 'manual')}
+              onValueChange={(value) => setSortMode(value as 'date' | 'topological' | 'reverse-topological')}
             >
               <SelectTrigger className="h-8 w-[180px] text-xs">
                 <SelectValue placeholder="Sort by..." />
@@ -728,11 +717,6 @@ export function ProjectTasks() {
                 <SelectItem value="reverse-topological">
                   <div className="flex items-center gap-2">
                     <span>⬆️ Children First</span>
-                  </div>
-                </SelectItem>
-                <SelectItem value="manual">
-                  <div className="flex items-center gap-2">
-                    <span>🎯 Custom Order</span>
                   </div>
                 </SelectItem>
               </SelectContent>
