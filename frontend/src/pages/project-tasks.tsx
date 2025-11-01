@@ -678,16 +678,6 @@ export function ProjectTasks() {
           </CardContent>
         </Card>
       </div>
-    ) : filteredTasks.length === 0 ? (
-      <div className="max-w-7xl mx-auto mt-8">
-        <Card>
-          <CardContent className="text-center py-8">
-            <p className="text-muted-foreground">
-              {t('empty.noSearchResults')}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
     ) : (
       <div className="w-full h-full flex flex-col">
         <div className="shrink-0 px-4 py-2 border-b bg-background flex items-center justify-between gap-4">
@@ -749,7 +739,17 @@ export function ProjectTasks() {
           </div>
         </div>
         <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto overscroll-x-contain touch-pan-y">
-          {viewMode === 'kanban' ? (
+          {filteredTasks.length === 0 ? (
+            <div className="max-w-7xl mx-auto mt-8">
+              <Card>
+                <CardContent className="text-center py-8">
+                  <p className="text-muted-foreground">
+                    {t('empty.noSearchResults')}
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          ) : viewMode === 'kanban' ? (
             <TaskKanbanBoard
               groupedTasks={groupedFilteredTasks}
               onDragEnd={handleDragEnd}
