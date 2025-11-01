@@ -33,15 +33,17 @@
           sqlx-cli
           openssl
           git
+          # For bindgen (used by libsqlite3-sys)
           llvmPackages.libclang
-          llvmPackages.libcxxClang
+          # For compiling C code (ring crate needs this)
+          gcc
+          binutils
         ];
 
         # Runtime dependencies
         buildInputs = with pkgs; [
           openssl
-          glibc
-          glibc.dev
+          sqlite
         ] ++ lib.optionals pkgs.stdenv.isDarwin [
           pkgs.darwin.apple_sdk.frameworks.Security
           pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
@@ -70,8 +72,12 @@
             # Set up environment for SQLx
             export DATABASE_URL="sqlite:dev_assets_seed/vibe-kanban.db"
 
-            # Set up libclang for bindgen (required for sqlite)
+            # Set up libclang for bindgen (required for libsqlite3-sys)
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+
+            # Ensure C compiler can find standard library headers
+            export C_INCLUDE_PATH="${pkgs.glibc.dev}/include:${pkgs.gcc.cc}/include"
+            export CPLUS_INCLUDE_PATH="${pkgs.glibc.dev}/include:${pkgs.gcc.cc}/include"
 
             # Ensure pnpm is set up
             if [ ! -d "node_modules" ]; then
