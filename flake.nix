@@ -1,0 +1,101 @@
+{
+  description = "Vibe Kanban - AI-powered task management with kanban board";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
+
+        # Use the specific nightly toolchain version from rust-toolchain.toml
+        rustToolchain = pkgs.rust-bin.nightly."2025-05-18".default.override {
+          extensions = [ "rust-src" "rust-analyzer" ];
+        };
+
+        # Build dependencies
+        nativeBuildInputs = with pkgs; [
+          rustToolchain
+          pkg-config
+          nodejs_20
+          pnpm
+          cargo-watch
+          sqlx-cli
+          openssl
+          git
+        ];
+
+        # Runtime dependencies
+        buildInputs = with pkgs; [
+          openssl
+        ] ++ lib.optionals pkgs.stdenv.isDarwin [
+          pkgs.darwin.apple_sdk.frameworks.Security
+          pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+        ];
+
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          inherit buildInputs nativeBuildInputs;
+
+          # Environment variables
+          shellHook = ''
+            echo "🚀 Vibe Kanban development environment"
+            echo ""
+            echo "Available commands:"
+            echo "  pnpm run dev          - Start development servers (frontend + backend)"
+            echo "  pnpm run check        - Run all checks (frontend + backend)"
+            echo "  pnpm run frontend:dev - Start frontend only"
+            echo "  pnpm run backend:dev  - Start backend only"
+            echo ""
+            echo "Node version: $(node --version)"
+            echo "pnpm version: $(pnpm --version)"
+            echo "Rust version: $(rustc --version)"
+            echo ""
+
+            # Set up environment for SQLx
+            export DATABASE_URL="sqlite:dev_assets_seed/vibe-kanban.db"
+
+            # Ensure pnpm is set up
+            if [ ! -d "node_modules" ]; then
+              echo "📦 Installing dependencies..."
+              pnpm install
+            fi
+          '';
+        };
+
+        # Optional: Add a package output for the application
+        packages.default = pkgs.stdenv.mkDerivation {
+          pname = "vibe-kanban";
+          version = "0.0.114";
+
+          src = ./.;
+
+          inherit nativeBuildInputs buildInputs;
+
+          buildPhase = ''
+            export HOME=$TMPDIR
+            pnpm install --frozen-lockfile
+            pnpm run build:npx
+          '';
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp -r npx-cli/dist $out/
+            cp -r npx-cli/bin $out/
+            chmod +x $out/bin/cli.js
+          '';
+        };
+      }
+    );
+}
