@@ -3,8 +3,9 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AlertTriangle, Plus } from 'lucide-react';
+import { AlertTriangle, Plus, LayoutGrid, Table } from 'lucide-react';
 import { Loader } from '@/components/ui/loader';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { tasksApi } from '@/lib/api';
 import type { GitBranch } from 'shared/types';
 import { openTaskForm } from '@/lib/openTaskForm';
@@ -40,6 +41,7 @@ import {
 } from '@/keyboard';
 
 import TaskKanbanBoard from '@/components/tasks/TaskKanbanBoard';
+import TaskTableView from '@/components/tasks/TaskTableView';
 import type { TaskWithAttemptStatus } from 'shared/types';
 import type { DragEndEvent } from '@/components/ui/shadcn-io/kanban';
 import { useProjectTasks } from '@/hooks/useProjectTasks';
@@ -147,6 +149,9 @@ export function ProjectTasks() {
 
   // Tag filtering state
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+
+  // View mode state (kanban or table)
+  const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
 
   const {
     tasks,
@@ -666,20 +671,53 @@ export function ProjectTasks() {
       </div>
     ) : (
       <div className="w-full h-full flex flex-col">
-        <div className="shrink-0 px-4 py-2 border-b bg-background">
+        <div className="shrink-0 px-4 py-2 border-b bg-background flex items-center justify-between gap-4">
           <TagFilter
             selectedTagIds={selectedTagIds}
             onTagsChange={setSelectedTagIds}
           />
+          <ToggleGroup
+            type="single"
+            value={viewMode}
+            onValueChange={(value) => {
+              if (value) setViewMode(value as 'kanban' | 'table');
+            }}
+            className="gap-1 bg-muted p-1 rounded-md"
+          >
+            <ToggleGroupItem
+              value="kanban"
+              aria-label="Kanban view"
+              className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
+              title="Kanban View"
+            >
+              <LayoutGrid className="h-4 w-4" />
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value="table"
+              aria-label="Table view"
+              className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
+              title="Table View"
+            >
+              <Table className="h-4 w-4" />
+            </ToggleGroupItem>
+          </ToggleGroup>
         </div>
         <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto overscroll-x-contain touch-pan-y">
-          <TaskKanbanBoard
-            groupedTasks={groupedFilteredTasks}
-            onDragEnd={handleDragEnd}
-            onViewTaskDetails={handleViewTaskDetails}
-            selectedTask={selectedTask || undefined}
-            onCreateTask={handleCreateNewTask}
-          />
+          {viewMode === 'kanban' ? (
+            <TaskKanbanBoard
+              groupedTasks={groupedFilteredTasks}
+              onDragEnd={handleDragEnd}
+              onViewTaskDetails={handleViewTaskDetails}
+              selectedTask={selectedTask || undefined}
+              onCreateTask={handleCreateNewTask}
+            />
+          ) : (
+            <TaskTableView
+              tasks={filteredTasks}
+              onViewTaskDetails={handleViewTaskDetails}
+              selectedTask={selectedTask || undefined}
+            />
+          )}
         </div>
       </div>
     );
