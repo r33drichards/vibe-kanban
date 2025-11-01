@@ -90,5 +90,8 @@ vibe-kanban-cloud/
 crates/db/prepare_db.sqlite
 dev_assets_seed/*.db
 
+# SQLx offline query data
+**/.sqlx/
+
 # Temporary directories
 $HOME/

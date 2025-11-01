@@ -37,6 +37,9 @@
           # For compiling C code (ring crate needs this)
           gcc
           binutils
+          # Fast linker for faster Rust builds
+          llvmPackages.lld
+          clang
         ];
 
         # Runtime dependencies
@@ -97,11 +100,20 @@
             # Set up LD_LIBRARY_PATH for runtime linking
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH"
 
+            # Set Rust build optimizations
+            export CARGO_BUILD_JOBS=8
+            export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+
             # Ensure pnpm is set up
             if [ ! -d "node_modules" ]; then
               echo "📦 Installing dependencies..."
               pnpm install
             fi
+
+            echo "⚡ Build optimizations enabled:"
+            echo "  - Parallel jobs: 8"
+            echo "  - Fast linker: lld"
+            echo "  - Incremental compilation: enabled"
           '';
         };
 
