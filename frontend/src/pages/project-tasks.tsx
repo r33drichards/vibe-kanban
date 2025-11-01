@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AlertTriangle, Plus, LayoutGrid, Table } from 'lucide-react';
+import { AlertTriangle, Plus, LayoutGrid, Table, ArrowDownUp } from 'lucide-react';
 import { Loader } from '@/components/ui/loader';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { tasksApi } from '@/lib/api';
@@ -14,6 +14,7 @@ import { showcases } from '@/config/showcases';
 import { useShowcaseTrigger } from '@/hooks/useShowcaseTrigger';
 import { usePostHog } from 'posthog-js/react';
 import { TagFilter } from '@/components/TagFilter';
+import { groupedTopologicalSort } from '@/lib/topologicalSort';
 
 import { useSearch } from '@/contexts/search-context';
 import { useProject } from '@/contexts/project-context';
@@ -152,6 +153,9 @@ export function ProjectTasks() {
 
   // View mode state (kanban or table)
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
+
+  // Sort mode state (creation date or topological)
+  const [sortMode, setSortMode] = useState<'date' | 'topological'>('date');
 
   const {
     tasks,
@@ -321,8 +325,14 @@ export function ProjectTasks() {
       );
     }
 
+    // Apply sort mode
+    if (sortMode === 'topological') {
+      result = groupedTopologicalSort(result);
+    }
+    // Note: if sortMode is 'date', tasks are already sorted by creation date from useProjectTasks
+
     return result;
-  }, [tasks, searchQuery, selectedTagIds]);
+  }, [tasks, searchQuery, selectedTagIds, sortMode]);
 
   const groupedFilteredTasks = useMemo(() => {
     const groups: Record<string, Task[]> = {};
@@ -676,31 +686,59 @@ export function ProjectTasks() {
             selectedTagIds={selectedTagIds}
             onTagsChange={setSelectedTagIds}
           />
-          <ToggleGroup
-            type="single"
-            value={viewMode}
-            onValueChange={(value) => {
-              if (value) setViewMode(value as 'kanban' | 'table');
-            }}
-            className="gap-1 bg-muted p-1 rounded-md"
-          >
-            <ToggleGroupItem
-              value="kanban"
-              aria-label="Kanban view"
-              className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
-              title="Kanban View"
+          <div className="flex items-center gap-2">
+            <ToggleGroup
+              type="single"
+              value={sortMode}
+              onValueChange={(value) => {
+                if (value) setSortMode(value as 'date' | 'topological');
+              }}
+              className="gap-1 bg-muted p-1 rounded-md"
             >
-              <LayoutGrid className="h-4 w-4" />
-            </ToggleGroupItem>
-            <ToggleGroupItem
-              value="table"
-              aria-label="Table view"
-              className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
-              title="Table View"
+              <ToggleGroupItem
+                value="date"
+                aria-label="Sort by date"
+                className="h-8 px-3 data-[state=on]:bg-background data-[state=on]:text-foreground text-xs"
+                title="Sort by Creation Date"
+              >
+                Date
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="topological"
+                aria-label="Topological sort"
+                className="h-8 px-3 data-[state=on]:bg-background data-[state=on]:text-foreground text-xs"
+                title="Sort by Parent-Child Relationships"
+              >
+                <ArrowDownUp className="h-3 w-3 mr-1" />
+                Topo
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <ToggleGroup
+              type="single"
+              value={viewMode}
+              onValueChange={(value) => {
+                if (value) setViewMode(value as 'kanban' | 'table');
+              }}
+              className="gap-1 bg-muted p-1 rounded-md"
             >
-              <Table className="h-4 w-4" />
-            </ToggleGroupItem>
-          </ToggleGroup>
+              <ToggleGroupItem
+                value="kanban"
+                aria-label="Kanban view"
+                className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
+                title="Kanban View"
+              >
+                <LayoutGrid className="h-4 w-4" />
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="table"
+                aria-label="Table view"
+                className="h-8 w-8 p-0 data-[state=on]:bg-background data-[state=on]:text-foreground"
+                title="Table View"
+              >
+                <Table className="h-4 w-4" />
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
         </div>
         <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto overscroll-x-contain touch-pan-y">
           {viewMode === 'kanban' ? (
