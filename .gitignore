@@ -82,3 +82,13 @@ dev_assets
 .ssh
 
 vibe-kanban-cloud/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Database files
+crates/db/prepare_db.sqlite
+dev_assets_seed/*.db
+
+# Temporary directories
+$HOME/

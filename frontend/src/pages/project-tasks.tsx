@@ -598,6 +598,7 @@ export function ProjectTasks() {
           status: newStatus,
           parent_task_attempt: task.parent_task_attempt,
           image_ids: null,
+          tag_ids: null,
         });
       } catch (err) {
         console.error('Failed to update task status:', err);
