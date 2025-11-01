@@ -130,6 +130,7 @@ export function NoServerContent({
         description: COMPANION_INSTALL_TASK_DESCRIPTION,
         parent_task_attempt: null,
         image_ids: null,
+        tag_ids: null,
       },
       executor_profile_id: config.executor_profile,
       base_branch: 'main',

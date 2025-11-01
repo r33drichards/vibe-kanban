@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Settings2, ChevronRight } from 'lucide-react';
+import { Settings2, ChevronRight, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import {
   ImageUploadSection,
   type ImageUploadSectionHandle,
@@ -21,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { imagesApi, projectsApi, attemptsApi } from '@/lib/api';
+import { imagesApi, projectsApi, attemptsApi, tagsApi } from '@/lib/api';
 import { useTaskMutations } from '@/hooks/useTaskMutations';
 import { useUserSystem } from '@/components/config-provider';
 import { ExecutorProfileSelector } from '@/components/settings';
@@ -31,6 +32,7 @@ import type {
   ImageResponse,
   GitBranch,
   ExecutorProfileId,
+  Tag,
 } from 'shared/types';
 import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { useKeySubmitTask, useKeySubmitTaskAlt, Scope } from '@/keyboard';
@@ -83,6 +85,9 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
       useState<boolean>(false);
     const imageUploadRef = useRef<ImageUploadSectionHandle>(null);
     const [isTextareaFocused, setIsTextareaFocused] = useState(false);
+    const [availableTags, setAvailableTags] = useState<Tag[]>([]);
+    const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+    const [newTagInput, setNewTagInput] = useState('');
 
     const isEditMode = Boolean(task);
 
@@ -139,6 +144,13 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
               setImages([]);
             });
         }
+
+        // Load existing tags for the task (from task object if available)
+        if ('tags' in task && Array.isArray((task as any).tags)) {
+          setSelectedTagIds((task as any).tags.map((tag: Tag) => tag.id));
+        } else {
+          setSelectedTagIds([]);
+        }
       } else if (initialTask) {
         // Duplicate mode - pre-fill from existing task but reset status to 'todo' and no images
         setTitle(initialTask.title);
@@ -146,6 +158,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
         setStatus('todo'); // Always start duplicated tasks as 'todo'
         setImages([]);
         setNewlyUploadedImageIds([]);
+        setSelectedTagIds([]);
       } else {
         // Create mode - reset to defaults
         setTitle('');
@@ -156,6 +169,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
         setSelectedBranch('');
         setSelectedExecutorProfile(system.config?.executor_profile || null);
         setQuickstartExpanded(false);
+        setSelectedTagIds([]);
       }
     }, [task, initialTask, modal.visible, system.config?.executor_profile]);
 
@@ -216,6 +230,19 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
       branches,
     ]);
 
+    // Fetch available tags when dialog opens
+    useEffect(() => {
+      if (modal.visible) {
+        tagsApi
+          .list()
+          .then((tags) => setAvailableTags(tags))
+          .catch((err) => {
+            console.error('Failed to fetch tags:', err);
+            setAvailableTags([]);
+          });
+      }
+    }, [modal.visible]);
+
     // Set default executor from config (following TaskDetailsToolbar pattern)
     useEffect(() => {
       if (system.config?.executor_profile) {
@@ -259,6 +286,47 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
       void imageUploadRef.current?.addFiles(files);
     }, []);
 
+    const handleToggleTag = useCallback((tagId: string) => {
+      setSelectedTagIds((prev) =>
+        prev.includes(tagId)
+          ? prev.filter((id) => id !== tagId)
+          : [...prev, tagId]
+      );
+    }, []);
+
+    const handleCreateTag = useCallback(async () => {
+      const tagName = newTagInput.trim();
+      if (!tagName) return;
+
+      // Check if tag already exists
+      const existingTag = availableTags.find(
+        (t) => t.tag_name.toLowerCase() === tagName.toLowerCase()
+      );
+      if (existingTag) {
+        // Just select the existing tag
+        if (!selectedTagIds.includes(existingTag.id)) {
+          setSelectedTagIds((prev) => [...prev, existingTag.id]);
+        }
+        setNewTagInput('');
+        return;
+      }
+
+      try {
+        // Create new tag
+        const newTag = await tagsApi.create({
+          tag_name: tagName,
+          content: `Label: ${tagName}`, // Placeholder content (database requires non-empty)
+        });
+
+        // Add to available tags and select it
+        setAvailableTags((prev) => [...prev, newTag]);
+        setSelectedTagIds((prev) => [...prev, newTag.id]);
+        setNewTagInput('');
+      } catch (error) {
+        console.error('Failed to create tag:', error);
+      }
+    }, [newTagInput, availableTags, selectedTagIds]);
+
     const handleSubmit = useCallback(async () => {
       if (!title.trim() || !projectId || isSubmitting || isSubmittingAndStart) {
         return;
@@ -290,6 +358,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
                 status,
                 parent_task_attempt: parentTaskAttemptId || null,
                 image_ids: imageIds || null,
+                tag_ids: selectedTagIds.length > 0 ? selectedTagIds : null,
               },
             },
             {
@@ -306,6 +375,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
               description: description,
               parent_task_attempt: parentTaskAttemptId || null,
               image_ids: imageIds || null,
+              tag_ids: selectedTagIds.length > 0 ? selectedTagIds : null,
             },
             {
               onSuccess: () => {
@@ -372,6 +442,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
               description: description,
               parent_task_attempt: parentTaskAttemptId || null,
               image_ids: imageIds || null,
+              tag_ids: selectedTagIds.length > 0 ? selectedTagIds : null,
             },
             executor_profile_id: finalExecutorProfile,
             base_branch: selectedBranch,
@@ -530,6 +601,82 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
                 collapsible={true}
                 defaultExpanded={false}
               />
+
+              {/* Tags Section */}
+              <div className="pt-2">
+                <Label htmlFor="tags-input" className="text-sm font-medium">
+                  Tags
+                </Label>
+                <div className="mt-1.5 space-y-2">
+                  {/* Selected tags */}
+                  {selectedTagIds.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedTagIds.map((tagId) => {
+                        const tag = availableTags.find((t) => t.id === tagId);
+                        return tag ? (
+                          <Badge
+                            key={tag.id}
+                            variant="secondary"
+                            className="gap-1 cursor-pointer hover:bg-secondary/80"
+                            onClick={() => handleToggleTag(tag.id)}
+                          >
+                            {tag.tag_name}
+                            <X className="h-3 w-3" />
+                          </Badge>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
+                  {/* Input for creating/selecting tags */}
+                  <div className="flex gap-2">
+                    <Input
+                      id="tags-input"
+                      value={newTagInput}
+                      onChange={(e) => setNewTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleCreateTag();
+                        }
+                      }}
+                      placeholder="Type tag name and press Enter"
+                      className="flex-1"
+                      disabled={isSubmitting || isSubmittingAndStart}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCreateTag}
+                      disabled={!newTagInput.trim() || isSubmitting || isSubmittingAndStart}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                  {/* Show existing tags as suggestions */}
+                  {availableTags.length > 0 && (
+                    <details className="group">
+                      <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground transition-colors list-none">
+                        Existing tags
+                      </summary>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {availableTags
+                          .filter((tag) => !selectedTagIds.includes(tag.id))
+                          .map((tag) => (
+                            <Badge
+                              key={tag.id}
+                              variant="outline"
+                              className="cursor-pointer hover:bg-secondary"
+                              onClick={() => handleToggleTag(tag.id)}
+                            >
+                              {tag.tag_name}
+                            </Badge>
+                          ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              </div>
 
               {isEditMode && (
                 <div className="pt-2">
