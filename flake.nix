@@ -31,6 +31,7 @@
           pnpm
           cargo-watch
           sqlx-cli
+          sqlite
           git
           # For bindgen (used by libsqlite3-sys)
           llvmPackages.libclang

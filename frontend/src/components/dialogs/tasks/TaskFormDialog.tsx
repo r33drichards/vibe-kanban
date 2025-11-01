@@ -404,6 +404,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
       isSubmitting,
       isSubmittingAndStart,
       parentTaskAttemptId,
+      selectedTagIds,
     ]);
 
     const handleCreateAndStart = useCallback(async () => {
@@ -472,6 +473,7 @@ export const TaskFormDialog = NiceModal.create<TaskFormDialogProps>(
       isSubmitting,
       isSubmittingAndStart,
       parentTaskAttemptId,
+      selectedTagIds,
     ]);
 
     const handleCancel = useCallback(() => {
