@@ -80,7 +80,7 @@ pub async fn create_project(
         }
     }
 
-    if let Some(url) = git_url {
+    if let Some(ref url) = git_url {
         // Clone from Git URL
         if path.exists() {
             return Ok(ResponseJson(ApiResponse::error(
