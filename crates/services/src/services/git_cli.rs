@@ -584,6 +584,62 @@ impl GitCli {
         }
         Ok(files)
     }
+
+    /// Clone a repository from a URL to a target path
+    pub fn clone(
+        &self,
+        clone_url: &str,
+        target_path: &Path,
+        token: Option<&str>,
+    ) -> Result<(), GitCliError> {
+        self.ensure_available()?;
+
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GitCliError::CommandFailed(format!("Failed to create parent directory: {}", e)))?;
+        }
+
+        // Build clone command
+        let git = resolve_executable_path("git").ok_or(GitCliError::NotAvailable)?;
+        let mut cmd = Command::new(&git);
+
+        // If token is provided, use HTTPS authentication
+        if let Some(token) = token {
+            let auth_header = self.build_auth_header(token);
+            let envs = self.build_token_env(&auth_header);
+
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+
+            cmd.arg("-c")
+                .arg("credential.helper=")
+                .arg("--config-env")
+                .arg("http.extraHeader=GIT_HTTP_EXTRAHEADER");
+        }
+
+        cmd.arg("clone")
+            .arg(clone_url)
+            .arg(target_path);
+
+        let out = cmd
+            .output()
+            .map_err(|e| GitCliError::CommandFailed(e.to_string()))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(self.classify_cli_error(stderr));
+        }
+
+        tracing::info!(
+            "Successfully cloned repository from {} to {}",
+            clone_url,
+            target_path.display()
+        );
+
+        Ok(())
+    }
 }
 
 // Private methods
