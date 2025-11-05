@@ -1,13 +1,19 @@
 {
   "name": "vkanban",
   "private": false,
-  "version": "0.0.114",
+  "version": "0.0.116",
   "main": "index.js",
   "bin": {
     "vibe-kanban": "bin/cli.js",
     "vkanban": "bin/cli.js"
   },
-  "keywords": ["kanban", "task-management", "project-management", "productivity", "cli"],
+  "keywords": [
+    "kanban",
+    "task-management",
+    "project-management",
+    "productivity",
+    "cli"
+  ],
   "author": "wholelottahoopla",
   "license": "MIT",
   "description": "A Kanban board task management tool with AI integration",
