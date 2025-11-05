@@ -58,6 +58,7 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
         name: suggestedName,
         git_repo_path: path,
         use_existing_repo: true,
+        git_url: null,
         setup_script: null,
         dev_script: null,
         cleanup_script: null,

@@ -1,7 +1,8 @@
 {
-  "name": "vibe-kanban",
-  "version": "0.0.116",
+  "name": "vkanban",
+  "version": "0.0.121",
   "bin": {
+    "vkanban": "npx-cli/bin/cli.js",
     "vibe-kanban": "npx-cli/bin/cli.js"
   },
   "files": [
@@ -26,6 +27,9 @@
     "prepare-db": "node scripts/prepare-db.js",
     "build:npx": "bash ./local-build.sh",
     "prepack": "npm run build:npx"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
