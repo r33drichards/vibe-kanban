@@ -21,8 +21,8 @@ import { generateProjectNameFromPath } from '@/utils/string';
 
 interface ProjectFormFieldsProps {
   isEditing: boolean;
-  repoMode: 'existing' | 'new';
-  setRepoMode: (mode: 'existing' | 'new') => void;
+  repoMode: 'existing' | 'new' | 'git-url';
+  setRepoMode: (mode: 'existing' | 'new' | 'git-url') => void;
   gitRepoPath: string;
   handleGitRepoPathChange: (path: string) => void;
   parentPath: string;
@@ -30,6 +30,8 @@ interface ProjectFormFieldsProps {
   setFolderName: (name: string) => void;
   setName: (name: string) => void;
   name: string;
+  gitUrl: string;
+  setGitUrl: (url: string) => void;
   setupScript: string;
   setSetupScript: (script: string) => void;
   devScript: string;
@@ -55,6 +57,8 @@ export function ProjectFormFields({
   setFolderName,
   setName,
   name,
+  gitUrl,
+  setGitUrl,
   setupScript,
   setSetupScript,
   devScript,
@@ -142,6 +146,27 @@ export function ProjectFormFields({
                       </div>
                       <div className="text-xs text-muted-foreground mt-1">
                         Start a new project from scratch
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* From Git URL card */}
+                <div
+                  className="p-4 border cursor-pointer hover:shadow-md transition-shadow rounded-lg bg-card"
+                  onClick={() => {
+                    setRepoMode('git-url');
+                    setError('');
+                  }}
+                >
+                  <div className="flex items-start gap-3">
+                    <FolderGit className="h-5 w-5 mt-0.5 flex-shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-foreground">
+                        Clone from Git URL
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Clone a repository from a Git URL (HTTPS or SSH)
                       </div>
                     </div>
                   </div>
@@ -344,6 +369,125 @@ export function ProjectFormFields({
                     const selectedPath = await showFolderPicker({
                       title: 'Select Parent Directory',
                       description: 'Choose where to create the new repository',
+                      value: parentPath,
+                    });
+                    if (selectedPath) {
+                      setParentPath(selectedPath);
+                    }
+                  }}
+                >
+                  <Folder className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Leave empty to use your current working directory, or specify a
+                custom path.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Git URL Form */}
+      {!isEditing && repoMode === 'git-url' && (
+        <div className="space-y-4">
+          {/* Back button */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setRepoMode('existing');
+              setError('');
+              setName('');
+              setParentPath('');
+              setFolderName('');
+              setGitUrl('');
+            }}
+            className="flex items-center gap-2"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to options
+          </Button>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="git-url">
+                Git Repository URL <span className="text-red-500">*</span>
+              </Label>
+              <Input
+                id="git-url"
+                type="text"
+                value={gitUrl}
+                onChange={(e) => {
+                  setGitUrl(e.target.value);
+                  // Auto-extract repo name from URL if possible
+                  const url = e.target.value.trim();
+                  if (url) {
+                    const match = url.match(/\/([^\/]+?)(\.git)?$/);
+                    if (match) {
+                      const repoName = match[1];
+                      setName(repoName.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+                      setFolderName(repoName);
+                    }
+                  }
+                }}
+                placeholder="https://github.com/user/repo.git or git@github.com:user/repo.git"
+                className="placeholder:text-secondary-foreground placeholder:opacity-100"
+                required
+              />
+              <p className="text-xs text-muted-foreground">
+                Enter the HTTPS or SSH URL of the Git repository to clone
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="git-url-project-name">
+                Project Name <span className="text-red-500">*</span>
+              </Label>
+              <Input
+                id="git-url-project-name"
+                type="text"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  if (e.target.value) {
+                    setFolderName(
+                      e.target.value
+                        .toLowerCase()
+                        .replace(/\s+/g, '-')
+                        .replace(/[^a-z0-9-]/g, '')
+                    );
+                  }
+                }}
+                placeholder="My Awesome Project"
+                className="placeholder:text-secondary-foreground placeholder:opacity-100"
+                required
+              />
+              <p className="text-xs text-muted-foreground">
+                The folder name will be auto-generated from the project name
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="git-url-parent-path">Parent Directory</Label>
+              <div className="flex space-x-2">
+                <Input
+                  id="git-url-parent-path"
+                  type="text"
+                  value={parentPath}
+                  onChange={(e) => setParentPath(e.target.value)}
+                  placeholder="Current Directory"
+                  className="flex-1 placeholder:text-secondary-foreground placeholder:opacity-100"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={async () => {
+                    const selectedPath = await showFolderPicker({
+                      title: 'Select Parent Directory',
+                      description: 'Choose where to clone the repository',
                       value: parentPath,
                     });
                     if (selectedPath) {

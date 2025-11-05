@@ -1846,9 +1846,21 @@ impl GitService {
         self.fetch_from_remote(repo, github_token, remote, &refspec)
     }
 
-    /// Clone a repository to the specified directory
-    #[cfg(feature = "cloud")]
+    /// Clone a repository to the specified directory using git CLI
     pub fn clone_repository(
+        &self,
+        clone_url: &str,
+        target_path: &Path,
+        token: Option<&str>,
+    ) -> Result<(), GitServiceError> {
+        let git_cli = GitCli::new();
+        git_cli.clone(clone_url, target_path, token)?;
+        Ok(())
+    }
+
+    /// Clone a repository to the specified directory (libgit2 version, cloud feature only)
+    #[cfg(feature = "cloud")]
+    pub fn clone_repository_libgit2(
         clone_url: &str,
         target_path: &Path,
         token: Option<&str>,
