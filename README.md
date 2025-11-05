@@ -115,7 +115,7 @@ By default, Vibe Kanban uses Bloop AI's GitHub OAuth app for authentication. To 
 
 1. Create a GitHub OAuth App at [GitHub Developer Settings](https://github.com/settings/developers)
 2. Enable "Device Flow" in the app settings
-3. Set scopes to include `user:email,repo`
+3. Set scopes to include `user:email,repo,workflow`
 4. Build with your client ID:
    ```bash
    GITHUB_CLIENT_ID=your_client_id_here pnpm run build

@@ -75,7 +75,7 @@ impl AuthService {
         let device_codes = client
             .authenticate_as_device(
                 &SecretString::from(self.client_id.clone()),
-                ["user:email", "repo"],
+                ["user:email", "repo", "workflow"],
             )
             .await?;
         self.device_codes
