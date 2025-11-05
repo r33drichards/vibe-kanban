@@ -25,9 +25,10 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
     const [name, setName] = useState('');
     const [gitRepoPath, setGitRepoPath] = useState('');
     const [error, setError] = useState('');
-    const [repoMode, setRepoMode] = useState<'existing' | 'new'>('existing');
+    const [repoMode, setRepoMode] = useState<'existing' | 'new' | 'git-url'>('existing');
     const [parentPath, setParentPath] = useState('');
     const [folderName, setFolderName] = useState('');
+    const [gitUrl, setGitUrl] = useState('');
 
     const { createProject } = useProjectMutations({
       onCreateSuccess: () => {
@@ -71,13 +72,24 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
       setError('');
 
       let finalGitRepoPath = gitRepoPath;
-      if (repoMode === 'new') {
+      let finalGitUrl: string | null = null;
+
+      if (repoMode === 'git-url') {
+        // For Git URL mode, use the provided path or generate one
+        const effectiveParentPath = parentPath.trim();
+        const cleanFolderName = folderName.trim();
+        finalGitRepoPath = effectiveParentPath
+          ? `${effectiveParentPath}/${cleanFolderName}`.replace(/\/+/g, '/')
+          : cleanFolderName;
+        finalGitUrl = gitUrl.trim();
+      } else if (repoMode === 'new') {
         const effectiveParentPath = parentPath.trim();
         const cleanFolderName = folderName.trim();
         finalGitRepoPath = effectiveParentPath
           ? `${effectiveParentPath}/${cleanFolderName}`.replace(/\/+/g, '/')
           : cleanFolderName;
       }
+
       // Auto-populate name from git repo path if not provided
       const finalName =
         name.trim() || generateProjectNameFromPath(finalGitRepoPath);
@@ -87,6 +99,7 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
         name: finalName,
         git_repo_path: finalGitRepoPath,
         use_existing_repo: repoMode === 'existing',
+        git_url: finalGitUrl,
         setup_script: null,
         dev_script: null,
         cleanup_script: null,
@@ -102,6 +115,7 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
       setGitRepoPath('');
       setParentPath('');
       setFolderName('');
+      setGitUrl('');
       setError('');
 
       modal.resolve('canceled' as ProjectFormDialogResult);
@@ -135,6 +149,8 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
                 setFolderName={setFolderName}
                 setName={setName}
                 name={name}
+                gitUrl={gitUrl}
+                setGitUrl={setGitUrl}
                 setupScript=""
                 setSetupScript={() => {}}
                 devScript=""
@@ -148,10 +164,14 @@ export const ProjectFormDialog = NiceModal.create<ProjectFormDialogProps>(
                 projectId={undefined}
                 onCreateProject={handleDirectCreate}
               />
-              {repoMode === 'new' && (
+              {(repoMode === 'new' || repoMode === 'git-url') && (
                 <Button
                   type="submit"
-                  disabled={createProject.isPending || !folderName.trim()}
+                  disabled={
+                    createProject.isPending ||
+                    (repoMode === 'new' && !folderName.trim()) ||
+                    (repoMode === 'git-url' && (!gitUrl.trim() || !folderName.trim()))
+                  }
                   className="w-full"
                 >
                   {createProject.isPending ? 'Creating...' : 'Create Project'}

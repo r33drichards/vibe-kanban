@@ -42,6 +42,7 @@ pub struct CreateProject {
     pub name: String,
     pub git_repo_path: String,
     pub use_existing_repo: bool,
+    pub git_url: Option<String>,
     pub setup_script: Option<String>,
     pub dev_script: Option<String>,
     pub cleanup_script: Option<String>,

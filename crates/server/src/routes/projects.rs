@@ -57,6 +57,7 @@ pub async fn create_project(
         cleanup_script,
         copy_files,
         use_existing_repo,
+        git_url,
     } = payload;
     tracing::debug!("Creating project '{}'", name);
 
@@ -79,7 +80,32 @@ pub async fn create_project(
         }
     }
 
-    if use_existing_repo {
+    if let Some(url) = git_url {
+        // Clone from Git URL
+        if path.exists() {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Target path already exists. Please choose a different path or delete the existing directory.",
+            )));
+        }
+
+        // Clone the repository
+        if let Err(e) = deployment.git().clone_repository(&url, &path, None) {
+            tracing::error!("Failed to clone repository from {}: {}", url, e);
+            return Ok(ResponseJson(ApiResponse::error(&format!(
+                "Failed to clone repository: {}",
+                e
+            ))));
+        }
+
+        // Ensure cloned repo has a main branch
+        if let Err(e) = deployment.git().ensure_main_branch_exists(&path) {
+            tracing::error!("Failed to ensure main branch exists: {}", e);
+            return Ok(ResponseJson(ApiResponse::error(&format!(
+                "Failed to ensure main branch exists: {}",
+                e
+            ))));
+        }
+    } else if use_existing_repo {
         // For existing repos, validate that the path exists and is a git repository
         if !path.exists() {
             return Ok(ResponseJson(ApiResponse::error(
@@ -133,12 +159,15 @@ pub async fn create_project(
         }
     }
 
+    let from_git_url = git_url.is_some();
+
     match Project::create(
         &deployment.db().pool,
         &CreateProject {
             name,
             git_repo_path: path.to_string_lossy().to_string(),
             use_existing_repo,
+            git_url: None, // Don't store the URL in the database
             setup_script,
             dev_script,
             cleanup_script,
@@ -156,6 +185,7 @@ pub async fn create_project(
                     serde_json::json!({
                         "project_id": project.id.to_string(),
                         "use_existing_repo": use_existing_repo,
+                        "from_git_url": from_git_url,
                         "has_setup_script": project.setup_script.is_some(),
                         "has_dev_script": project.dev_script.is_some(),
                         "trigger": "manual",
