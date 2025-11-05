@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { AlertTriangle, Plus, LayoutGrid, Table, ArrowDownUp } from 'lucide-react';
+import { AlertTriangle, Plus, LayoutGrid, Table } from 'lucide-react';
 import { Loader } from '@/components/ui/loader';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { tasksApi } from '@/lib/api';

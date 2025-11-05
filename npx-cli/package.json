@@ -1,15 +1,24 @@
 {
-  "name": "vibe-kanban",
+  "name": "vkanban",
   "private": false,
   "version": "0.0.114",
   "main": "index.js",
   "bin": {
-    "vibe-kanban": "bin/cli.js"
+    "vibe-kanban": "bin/cli.js",
+    "vkanban": "bin/cli.js"
   },
-  "keywords": [],
-  "author": "bloop",
-  "license": "",
-  "description": "NPX wrapper around vibe-kanban and vibe-kanban-mcp",
+  "keywords": ["kanban", "task-management", "project-management", "productivity", "cli"],
+  "author": "wholelottahoopla",
+  "license": "MIT",
+  "description": "A Kanban board task management tool with AI integration",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/r33drichards/vibe-kanban.git"
+  },
+  "homepage": "https://github.com/r33drichards/vibe-kanban#readme",
+  "bugs": {
+    "url": "https://github.com/r33drichards/vibe-kanban/issues"
+  },
   "dependencies": {
     "adm-zip": "^0.5.16"
   },
