@@ -232,6 +232,122 @@ ORDER BY t.created_at DESC"#,
         Ok(tasks)
     }
 
+    pub async fn find_all_with_attempt_status(
+        pool: &SqlitePool,
+    ) -> Result<Vec<TaskWithAttemptStatus>, sqlx::Error> {
+        let records = sqlx::query!(
+            r#"SELECT
+  t.id                            AS "id!: Uuid",
+  t.project_id                    AS "project_id!: Uuid",
+  t.title,
+  t.description,
+  t.status                        AS "status!: TaskStatus",
+  t.parent_task_attempt           AS "parent_task_attempt: Uuid",
+  t.created_at                    AS "created_at!: DateTime<Utc>",
+  t.updated_at                    AS "updated_at!: DateTime<Utc>",
+
+  CASE WHEN EXISTS (
+    SELECT 1
+      FROM task_attempts ta
+      JOIN execution_processes ep
+        ON ep.task_attempt_id = ta.id
+     WHERE ta.task_id       = t.id
+       AND ep.status        = 'running'
+       AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')
+     LIMIT 1
+  ) THEN 1 ELSE 0 END            AS "has_in_progress_attempt!: i64",
+
+  CASE WHEN (
+    SELECT ep.status
+      FROM task_attempts ta
+      JOIN execution_processes ep
+        ON ep.task_attempt_id = ta.id
+     WHERE ta.task_id       = t.id
+     AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')
+     ORDER BY ep.created_at DESC
+     LIMIT 1
+  ) IN ('failed','killed') THEN 1 ELSE 0 END
+                                 AS "last_attempt_failed!: i64",
+
+  ( SELECT ta.executor
+      FROM task_attempts ta
+      WHERE ta.task_id = t.id
+     ORDER BY ta.created_at DESC
+      LIMIT 1
+    )                               AS "executor!: String"
+
+FROM tasks t
+ORDER BY t.created_at DESC"#
+        )
+        .fetch_all(pool)
+        .await?;
+
+        // Collect task IDs to fetch tags
+        let task_ids: Vec<Uuid> = records.iter().map(|rec| rec.id).collect();
+
+        // Fetch all tags for these tasks in one query
+        let tag_records = if !task_ids.is_empty() {
+            let task_ids_json = serde_json::to_string(&task_ids).unwrap();
+
+            sqlx::query!(
+                r#"SELECT
+                    tt.task_id as "task_id!: Uuid",
+                    t.id as "tag_id!: Uuid",
+                    t.tag_name,
+                    t.content as "content!",
+                    t.created_at as "created_at!: DateTime<Utc>",
+                    t.updated_at as "updated_at!: DateTime<Utc>"
+                FROM task_tags tt
+                JOIN tags t ON tt.tag_id = t.id
+                WHERE tt.task_id IN (SELECT value FROM json_each(?))
+                ORDER BY t.tag_name ASC"#,
+                task_ids_json
+            )
+            .fetch_all(pool)
+            .await?
+        } else {
+            vec![]
+        };
+
+        // Group tags by task_id
+        let mut tags_by_task: std::collections::HashMap<Uuid, Vec<Tag>> = std::collections::HashMap::new();
+        for tag_rec in tag_records {
+            tags_by_task.entry(tag_rec.task_id).or_default().push(Tag {
+                id: tag_rec.tag_id,
+                tag_name: tag_rec.tag_name,
+                content: tag_rec.content,
+                created_at: tag_rec.created_at,
+                updated_at: tag_rec.updated_at,
+            });
+        }
+
+        let tasks = records
+            .into_iter()
+            .map(|rec| {
+                let tags = tags_by_task.get(&rec.id).cloned().unwrap_or_default();
+                TaskWithAttemptStatus {
+                    task: Task {
+                        id: rec.id,
+                        project_id: rec.project_id,
+                        title: rec.title,
+                        description: rec.description,
+                        status: rec.status,
+                        parent_task_attempt: rec.parent_task_attempt,
+                        created_at: rec.created_at,
+                        updated_at: rec.updated_at,
+                    },
+                    has_in_progress_attempt: rec.has_in_progress_attempt != 0,
+                    has_merged_attempt: false, // TODO use merges table
+                    last_attempt_failed: rec.last_attempt_failed != 0,
+                    executor: rec.executor,
+                    tags,
+                }
+            })
+            .collect();
+
+        Ok(tasks)
+    }
+
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             Task,

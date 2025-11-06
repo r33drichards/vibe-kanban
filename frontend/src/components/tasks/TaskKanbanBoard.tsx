@@ -7,7 +7,7 @@ import {
   KanbanProvider,
 } from '@/components/ui/shadcn-io/kanban';
 import { TaskCard } from './TaskCard';
-import type { TaskStatus, TaskWithAttemptStatus } from 'shared/types';
+import type { TaskStatus, TaskWithAttemptStatus, Project } from 'shared/types';
 // import { useParams } from 'react-router-dom';
 
 import { statusBoardColors, statusLabels } from '@/utils/status-labels';
@@ -20,6 +20,8 @@ interface TaskKanbanBoardProps {
   onViewTaskDetails: (task: Task) => void;
   selectedTask?: Task;
   onCreateTask?: () => void;
+  showProjectBadge?: boolean;
+  projectsById?: Record<string, Project>;
 }
 
 function TaskKanbanBoard({
@@ -28,6 +30,8 @@ function TaskKanbanBoard({
   onViewTaskDetails,
   selectedTask,
   onCreateTask,
+  showProjectBadge,
+  projectsById,
 }: TaskKanbanBoardProps) {
   return (
     <KanbanProvider onDragEnd={onDragEnd}>
@@ -47,6 +51,8 @@ function TaskKanbanBoard({
                 status={status}
                 onViewDetails={onViewTaskDetails}
                 isOpen={selectedTask?.id === task.id}
+                showProjectBadge={showProjectBadge}
+                projectName={showProjectBadge && projectsById ? projectsById[task.project_id]?.name : undefined}
               />
             ))}
           </KanbanCards>

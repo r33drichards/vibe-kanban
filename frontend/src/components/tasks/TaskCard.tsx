@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { KanbanCard } from '@/components/ui/shadcn-io/kanban';
 import { CheckCircle, Loader2, XCircle } from 'lucide-react';
-import type { TaskWithAttemptStatus } from 'shared/types';
+import type { TaskWithAttemptStatus, Project } from 'shared/types';
 import { ActionsDropdown } from '@/components/ui/ActionsDropdown';
 import { Badge } from '@/components/ui/badge';
 
@@ -13,6 +13,8 @@ interface TaskCardProps {
   status: string;
   onViewDetails: (task: Task) => void;
   isOpen?: boolean;
+  showProjectBadge?: boolean;
+  projectName?: string;
 }
 
 export function TaskCard({
@@ -21,6 +23,8 @@ export function TaskCard({
   status,
   onViewDetails,
   isOpen,
+  showProjectBadge,
+  projectName,
 }: TaskCardProps) {
   const handleClick = useCallback(() => {
     onViewDetails(task);
@@ -84,6 +88,13 @@ export function TaskCard({
             ? `${task.description.substring(0, 130)}...`
             : task.description}
         </p>
+      )}
+      {showProjectBadge && projectName && (
+        <div className="mt-2">
+          <Badge variant="outline" className="text-xs px-2 py-0.5">
+            {projectName}
+          </Badge>
+        </div>
       )}
       {task.tags && task.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-2">

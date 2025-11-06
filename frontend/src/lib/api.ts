@@ -279,6 +279,11 @@ export const tasksApi = {
     return handleApiResponse<TaskWithAttemptStatus[]>(response);
   },
 
+  getAllGlobal: async (): Promise<TaskWithAttemptStatus[]> => {
+    const response = await makeRequest(`/api/tasks`);
+    return handleApiResponse<TaskWithAttemptStatus[]>(response);
+  },
+
   getById: async (taskId: string): Promise<Task> => {
     const response = await makeRequest(`/api/tasks/${taskId}`);
     return handleApiResponse<Task>(response);
