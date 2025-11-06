@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { TaskStatus, TaskWithAttemptStatus } from 'shared/types';
+import type { TaskStatus, TaskWithAttemptStatus, Project } from 'shared/types';
 import {
   Table,
   TableBody,
@@ -20,12 +20,16 @@ interface TaskTableViewProps {
   tasks: Task[];
   onViewTaskDetails: (task: Task) => void;
   selectedTask?: Task;
+  showProjectColumn?: boolean;
+  projectsById?: Record<string, Project>;
 }
 
 function TaskTableView({
   tasks,
   onViewTaskDetails,
   selectedTask,
+  showProjectColumn,
+  projectsById,
 }: TaskTableViewProps) {
   const getStatusBadgeColor = (status: TaskStatus) => {
     const colorMap: Record<TaskStatus, string> = {
@@ -43,8 +47,9 @@ function TaskTableView({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-[40%]">Title</TableHead>
-            <TableHead className="w-[30%]">Description</TableHead>
+            <TableHead className={showProjectColumn ? "w-[30%]" : "w-[40%]"}>Title</TableHead>
+            <TableHead className={showProjectColumn ? "w-[20%]" : "w-[30%]"}>Description</TableHead>
+            {showProjectColumn && <TableHead className="w-[15%]">Project</TableHead>}
             <TableHead className="w-[12%]">Status</TableHead>
             <TableHead className="w-[12%]">Tags</TableHead>
             <TableHead className="w-[6%] text-center">Indicators</TableHead>
@@ -73,6 +78,17 @@ function TaskTableView({
                     : '-'}
                 </div>
               </TableCell>
+              {showProjectColumn && (
+                <TableCell>
+                  {projectsById && projectsById[task.project_id] ? (
+                    <Badge variant="outline" className="text-xs">
+                      {projectsById[task.project_id].name}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted-foreground text-sm">-</span>
+                  )}
+                </TableCell>
+              )}
               <TableCell>
                 <Badge
                   variant="secondary"

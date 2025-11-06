@@ -33,18 +33,37 @@ use crate::{DeploymentImpl, error::ApiError, middleware::load_task_middleware};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskQuery {
-    pub project_id: Uuid,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
     #[serde(default)]
     pub tag_ids: Option<String>, // Comma-separated tag IDs for filtering
+    #[serde(default)]
+    pub project_ids: Option<String>, // Comma-separated project IDs for filtering (global view)
 }
 
 pub async fn get_tasks(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<TaskQuery>,
 ) -> Result<ResponseJson<ApiResponse<Vec<TaskWithAttemptStatus>>>, ApiError> {
-    let mut tasks =
-        Task::find_by_project_id_with_attempt_status(&deployment.db().pool, query.project_id)
-            .await?;
+    let mut tasks = if let Some(project_id) = query.project_id {
+        // Project-scoped query
+        Task::find_by_project_id_with_attempt_status(&deployment.db().pool, project_id).await?
+    } else {
+        // Global query
+        Task::find_all_with_attempt_status(&deployment.db().pool).await?
+    };
+
+    // Filter by projects if project_ids are provided (for global view)
+    if let Some(project_ids_str) = query.project_ids {
+        let project_ids: Vec<Uuid> = project_ids_str
+            .split(',')
+            .filter_map(|id| id.trim().parse::<Uuid>().ok())
+            .collect();
+
+        if !project_ids.is_empty() {
+            tasks.retain(|task| project_ids.contains(&task.project_id));
+        }
+    }
 
     // Filter by tags if tag_ids are provided
     if let Some(tag_ids_str) = query.tag_ids {
@@ -68,12 +87,17 @@ pub async fn stream_tasks_ws(
     ws: WebSocketUpgrade,
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<TaskQuery>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle_tasks_ws(socket, deployment, query.project_id).await {
+) -> Result<impl IntoResponse, ApiError> {
+    // For WebSocket streaming, we still require a project_id
+    let project_id = query.project_id.ok_or_else(|| {
+        ApiError::BadRequest("project_id is required for WebSocket streaming".to_string())
+    })?;
+
+    Ok(ws.on_upgrade(move |socket| async move {
+        if let Err(e) = handle_tasks_ws(socket, deployment, project_id).await {
             tracing::warn!("tasks WS closed: {}", e);
         }
-    })
+    }))
 }
 
 async fn handle_tasks_ws(
