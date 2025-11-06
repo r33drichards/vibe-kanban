@@ -1,6 +1,6 @@
 {
   "name": "vkanban",
-  "version": "0.0.121",
+  "version": "0.0.116",
   "bin": {
     "vkanban": "npx-cli/bin/cli.js",
     "vibe-kanban": "npx-cli/bin/cli.js"
