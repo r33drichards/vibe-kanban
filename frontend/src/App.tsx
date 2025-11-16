@@ -4,6 +4,7 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
 import { Projects } from '@/pages/projects';
 import { ProjectTasks } from '@/pages/project-tasks';
+import { GlobalTasks } from '@/pages/global-tasks';
 import { FullAttemptLogsPage } from '@/pages/full-attempt-logs';
 import { NormalLayout } from '@/components/layout/NormalLayout';
 import { usePostHog } from 'posthog-js/react';
@@ -168,6 +169,7 @@ function AppContent() {
                 <Route path="/" element={<Projects />} />
                 <Route path="/projects" element={<Projects />} />
                 <Route path="/projects/:projectId" element={<Projects />} />
+                <Route path="/tasks" element={<GlobalTasks />} />
                 <Route
                   path="/projects/:projectId/tasks"
                   element={<ProjectTasks />}
